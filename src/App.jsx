@@ -27,22 +27,20 @@ import liff from "@line/liff";
  * 4. 仍避免 Firestore composite index：查詢只用 where / limit，排序交給前端。
  */
 
-const DEV_MODE = true;
-const DEV_LOGIN_AS = "owner"; // owner / newEmployee / employee
-const LIFF_ID = "請貼上你的 LIFF ID";
+// ===== 🔥 上線設定區（只需要改這裡） =====
 
-const firebaseConfig = {
-  apiKey: "AIzaSyAbfvJlElGLgI1lX7fsdEeV3VS8Gk0o3YA",
-  authDomain: "attendance-app-c95ff.firebaseapp.com",
-  projectId: "attendance-app-c95ff",
-  storageBucket: "attendance-app-c95ff.firebasestorage.app",
-  messagingSenderId: "1069052716411",
-  appId: "1069052716411:web:83129a080b3bd62bbdc9de",
-};
+// 👉 上線請保持 false
+const DEV_MODE = false;
 
-const DEPARTMENTS = ["烘焙坊", "超市"];
-const DEFAULT_GRACE_MINUTES = 10;
-const OWNER_LINE_USER_IDS = ["DEV_OWNER_USER_ID"];
+// 👉 貼上你的 LIFF ID
+const LIFF_ID = "2009896295-aplNwbiH";
+
+// 👉 貼上你的 LINE userId（老闆）
+const OWNER_LINE_USER_IDS = [
+  "U0d01ce43203dbcf0d3a94436b60eb232"
+];
+
+// ======================================
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
@@ -525,20 +523,46 @@ function AdminPanel({ currentUser, setGlobalError }) {
   const [todayRecords, setTodayRecords] = useState([]);
   const [creatingEmployee, setCreatingEmployee] = useState(false);
   const [editingEmployeeId, setEditingEmployeeId] = useState(null);
+  const [creatingAttendance, setCreatingAttendance] = useState(false);
+  const [editingAttendanceId, setEditingAttendanceId] = useState(null);
+  const [creatingCorrection, setCreatingCorrection] = useState(false);
+  const [editingCorrectionId, setEditingCorrectionId] = useState(null);
   const [manualEmployeeForm, setManualEmployeeForm] = useState({ lineUserId: "", name: "", displayName: "", phone: "", role: "employee", status: "active", departments: ["烘焙坊"], hourlyWage: 190, note: "" });
+  const [attendanceForm, setAttendanceForm] = useState({ employeeId: "", date: todayString(), clockIn: "09:00", clockOut: "18:00", department: "烘焙坊", source: "manual", note: "" });
+  const [correctionForm, setCorrectionForm] = useState({ employeeId: "", type: "clockIn", date: todayString(), time: "09:00", reason: "主管手動新增", status: "pending" });
+
   useEffect(() => { loadAll(); }, []);
+
   async function loadAll() {
     const employeeSnap = await safeRun(() => getDocs(collection(db, "employees")), "讀取員工資料失敗。", setGlobalError);
-    if (employeeSnap) setEmployees(sortByCreatedAtDesc(employeeSnap.docs.map((d) => ({ id: d.id, ...d.data() }))));
-    const correctionSnap = await safeRun(() => getDocs(query(collection(db, "correctionRequests"), where("status", "==", "pending"), limit(50))), "讀取補卡審核失敗。", setGlobalError);
+    if (employeeSnap) {
+      const rows = sortByCreatedAtDesc(employeeSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      setEmployees(rows);
+      const firstActive = rows.find((emp) => emp.status === "active" && emp.role !== "owner") || rows[0];
+      if (firstActive) {
+        setAttendanceForm((prev) => ({ ...prev, employeeId: prev.employeeId || firstActive.lineUserId || firstActive.id, department: prev.department || getEmployeeDepartments(firstActive)[0] }));
+        setCorrectionForm((prev) => ({ ...prev, employeeId: prev.employeeId || firstActive.lineUserId || firstActive.id }));
+      }
+    }
+    const correctionSnap = await safeRun(() => getDocs(query(collection(db, "correctionRequests"), limit(100))), "讀取補卡資料失敗。", setGlobalError);
     if (correctionSnap) setCorrections(sortByCreatedAtDesc(correctionSnap.docs.map((d) => ({ id: d.id, ...d.data() }))));
     const todaySnap = await safeRun(() => getDocs(query(collection(db, "attendanceRecords"), where("date", "==", todayString()), limit(100))), "讀取今日打卡紀錄失敗。", setGlobalError);
     if (todaySnap) setTodayRecords(sortByCreatedAtDesc(todaySnap.docs.map((d) => ({ id: d.id, ...d.data() }))));
   }
+
   async function updateEmployee(emp, patch) {
     const ok = await safeRun(() => updateDoc(doc(db, "employees", emp.id), { ...patch, updatedAt: serverTimestamp() }), "更新員工資料失敗。", setGlobalError);
     if (ok !== null) await loadAll();
   }
+
+  async function deleteEmployee(emp) {
+    const okConfirm = window.confirm(`確定刪除員工「${emp.name || emp.displayName || emp.id}」？
+注意：這不會自動刪除他的既有打卡紀錄。`);
+    if (!okConfirm) return;
+    const ok = await safeRun(() => deleteDoc(doc(db, "employees", emp.id)), "刪除員工失敗。", setGlobalError);
+    if (ok !== null) await loadAll();
+  }
+
   async function createManualEmployee(e) {
     e.preventDefault();
     if (!manualEmployeeForm.name.trim()) return alert("請填寫員工姓名");
@@ -550,17 +574,154 @@ function AdminPanel({ currentUser, setGlobalError }) {
       await loadAll();
     }
   }
+
+  function getEmployeeByLineId(employeeId) {
+    return employees.find((emp) => (emp.lineUserId || emp.id) === employeeId);
+  }
+
+  function buildAttendancePayload(form) {
+    const emp = getEmployeeByLineId(form.employeeId);
+    const employeeName = emp?.name || emp?.displayName || "未命名員工";
+    const workMinutes = form.clockIn && form.clockOut ? minutesBetween(form.clockIn, form.clockOut) : 0;
+    return {
+      employeeId: form.employeeId,
+      employeeName,
+      department: form.department || emp?.department || getEmployeeDepartments(emp)[0] || "未設定",
+      date: form.date,
+      month: form.date.slice(0, 7),
+      clockIn: form.clockIn || "",
+      clockOut: form.clockOut || "",
+      workMinutes,
+      workHours: formatHours(workMinutes),
+      attendanceStatus: "manualCorrection",
+      lateMinutes: 0,
+      earlyLeaveMinutes: 0,
+      source: form.source || "manual",
+      status: form.clockIn && form.clockOut ? "completed" : "open",
+      note: form.note || "主管手動建立/修改",
+      updatedAt: serverTimestamp(),
+    };
+  }
+
+  async function createAttendanceRecord(e) {
+    e.preventDefault();
+    if (!attendanceForm.employeeId) return alert("請選擇員工");
+    if (!attendanceForm.date) return alert("請選擇日期");
+    const payload = buildAttendancePayload(attendanceForm);
+    const ok = await safeRun(() => addDoc(collection(db, "attendanceRecords"), { ...payload, createdAt: serverTimestamp() }), "新增打卡紀錄失敗。", setGlobalError);
+    if (ok !== null) {
+      setCreatingAttendance(false);
+      await loadAll();
+    }
+  }
+
+  async function updateAttendanceRecord(record, patch) {
+    const next = { ...record, ...patch };
+    const workMinutes = next.clockIn && next.clockOut ? minutesBetween(next.clockIn, next.clockOut) : 0;
+    const updatePayload = {
+      ...patch,
+      month: next.date ? next.date.slice(0, 7) : record.month,
+      workMinutes,
+      workHours: formatHours(workMinutes),
+      status: next.clockIn && next.clockOut ? "completed" : "open",
+      updatedAt: serverTimestamp(),
+    };
+    const ok = await safeRun(() => updateDoc(doc(db, "attendanceRecords", record.id), updatePayload), "修改打卡紀錄失敗。", setGlobalError);
+    if (ok !== null) await loadAll();
+  }
+
+  async function deleteAttendanceRecord(record) {
+    const okConfirm = window.confirm(`確定刪除 ${record.employeeName} ${record.date} 的打卡紀錄？`);
+    if (!okConfirm) return;
+    const ok = await safeRun(() => deleteDoc(doc(db, "attendanceRecords", record.id)), "刪除打卡紀錄失敗。", setGlobalError);
+    if (ok !== null) await loadAll();
+  }
+
+  function buildCorrectionPayload(form) {
+    const emp = getEmployeeByLineId(form.employeeId);
+    return {
+      employeeId: form.employeeId,
+      employeeName: emp?.name || emp?.displayName || "未命名員工",
+      department: emp?.department || getEmployeeDepartments(emp)[0] || "未設定",
+      type: form.type,
+      date: form.date,
+      time: form.time,
+      reason: form.reason || "主管手動新增",
+      status: form.status || "pending",
+      reviewedBy: form.status === "pending" ? null : currentUser.name,
+      reviewedAt: form.status === "pending" ? null : serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+  }
+
+  async function createCorrectionRequest(e) {
+    e.preventDefault();
+    if (!correctionForm.employeeId) return alert("請選擇員工");
+    const payload = buildCorrectionPayload(correctionForm);
+    const ok = await safeRun(() => addDoc(collection(db, "correctionRequests"), { ...payload, createdAt: serverTimestamp() }), "新增補卡資料失敗。", setGlobalError);
+    if (ok !== null) {
+      setCreatingCorrection(false);
+      await loadAll();
+    }
+  }
+
+  async function updateCorrectionRequest(item, patch) {
+    const payload = {
+      ...patch,
+      updatedAt: serverTimestamp(),
+      ...(patch.status && patch.status !== "pending" ? { reviewedBy: currentUser.name, reviewedAt: serverTimestamp() } : {}),
+    };
+    const ok = await safeRun(() => updateDoc(doc(db, "correctionRequests", item.id), payload), "修改補卡資料失敗。", setGlobalError);
+    if (ok !== null) await loadAll();
+  }
+
+  async function deleteCorrectionRequest(item) {
+    const okConfirm = window.confirm(`確定刪除 ${item.employeeName} ${item.date} 的補卡申請？`);
+    if (!okConfirm) return;
+    const ok = await safeRun(() => deleteDoc(doc(db, "correctionRequests", item.id)), "刪除補卡資料失敗。", setGlobalError);
+    if (ok !== null) await loadAll();
+  }
+
   async function reviewCorrection(item, approved) {
     const update = approved ? { status: "approved" } : { status: "rejected" };
     const ok = await safeRun(() => updateDoc(doc(db, "correctionRequests", item.id), { ...update, reviewedBy: currentUser.name, reviewedAt: serverTimestamp(), updatedAt: serverTimestamp() }), "更新補卡審核失敗。", setGlobalError);
     if (ok !== null) await loadAll();
   }
-  return <div className="space-y-5"><Card title="員工管理" subtitle="預設顯示員工摘要，點擊修改後才展開詳細資料。"><div className="mb-5 rounded-3xl border border-neutral-200 bg-neutral-50 p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="font-bold">手動新增員工</h3><p className="mt-1 text-xs text-neutral-500">LINE ID 可先留空，系統會產生 MANUAL ID。</p></div><button type="button" onClick={() => setCreatingEmployee(!creatingEmployee)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingEmployee ? "收合" : "新增員工"}</button></div>{creatingEmployee && <form onSubmit={createManualEmployee} className="grid gap-3 md:grid-cols-3"><Input label="員工姓名" value={manualEmployeeForm.name} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, name: v })} /><Input label="LINE User ID / 員工ID（可先留空）" value={manualEmployeeForm.lineUserId} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, lineUserId: v })} /><Input label="電話" value={manualEmployeeForm.phone} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, phone: v })} /><Select label="狀態" value={manualEmployeeForm.status} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, status: v })}><option value="pending">待審核</option><option value="active">啟用</option><option value="disabled">停用</option></Select><Select label="權限" value={manualEmployeeForm.role} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, role: v })}><option value="employee">員工</option><option value="manager">管理員</option><option value="owner">老闆</option></Select><Input label="時薪" type="number" value={String(manualEmployeeForm.hourlyWage)} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, hourlyWage: Number(v || 0) })} /><div className="md:col-span-2"><DepartmentCheckboxes label="可支援部門" value={manualEmployeeForm.departments} onChange={(departments) => setManualEmployeeForm({ ...manualEmployeeForm, departments })} /></div><Input label="備註" value={manualEmployeeForm.note} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-3">建立員工資料</button></form>}</div><div className="space-y-3">{employees.map((emp) => {
-    const isEditing = editingEmployeeId === emp.id;
-    const statusLabel = emp.status === "active" ? "啟用" : emp.status === "pending" ? "待審核" : emp.status === "disabled" ? "停用" : emp.status || "未知";
-    const roleLabel = emp.role === "owner" ? "老闆" : emp.role === "manager" ? "管理員" : "員工";
-    return <div key={emp.id} className="rounded-2xl border bg-white p-3"><div className="grid gap-3 md:grid-cols-[1.5fr_1fr_1fr_1fr_auto] md:items-center"><div><div className="font-bold">{emp.name || emp.displayName || "未命名員工"}</div><div className="break-all text-xs text-neutral-500">{emp.lineUserId || emp.id}</div></div><div className="text-sm"><span className={`rounded-full px-3 py-1 font-bold ${emp.status === "active" ? "bg-green-50 text-green-700" : emp.status === "disabled" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{statusLabel}</span></div><div className="text-sm text-neutral-600">{roleLabel}</div><div className="text-sm text-neutral-600">{getEmployeeDepartments(emp).join("、")}｜${Number(emp.hourlyWage || 0)}/hr</div><button type="button" onClick={() => setEditingEmployeeId(isEditing ? null : emp.id)} className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-4"><Input label="姓名" value={emp.name || ""} onChange={(v) => updateEmployee(emp, { name: v })} /><Input label="電話" value={emp.phone || ""} onChange={(v) => updateEmployee(emp, { phone: v })} /><Select label="狀態" value={emp.status || "pending"} onChange={(v) => updateEmployee(emp, { status: v })}><option value="pending">待審核</option><option value="active">啟用</option><option value="disabled">停用</option></Select><Select label="權限" value={emp.role || "employee"} onChange={(v) => updateEmployee(emp, { role: v })}><option value="employee">員工</option><option value="manager">管理員</option><option value="owner">老闆</option></Select><div className="md:col-span-2"><DepartmentCheckboxes label="可支援部門" value={getEmployeeDepartments(emp)} onChange={(departments) => updateEmployee(emp, { departments, department: departments[0] || "烘焙坊" })} /></div><Input label="時薪" type="number" value={String(emp.hourlyWage || 0)} onChange={(v) => updateEmployee(emp, { hourlyWage: Number(v || 0) })} /><Input label="備註" value={emp.note || ""} onChange={(v) => updateEmployee(emp, { note: v })} /></div>}</div>;
-  })}</div></Card><Card title="補卡審核"><SimpleList items={corrections} empty="目前沒有待審核補卡" render={(item) => <div className="rounded-2xl border p-3"><div className="font-bold">{item.employeeName}｜{item.date} {item.time}</div><div className="text-sm text-neutral-500">{item.type === "clockIn" ? "補上班卡" : "補下班卡"}｜{item.reason}</div><div className="mt-3 flex gap-2"><button onClick={() => reviewCorrection(item, true)} className="rounded-xl bg-neutral-900 px-3 py-2 text-sm font-bold text-white">通過</button><button onClick={() => reviewCorrection(item, false)} className="rounded-xl bg-neutral-200 px-3 py-2 text-sm font-bold">退回</button></div></div>} /></Card><Card title="今日打卡紀錄"><RecordTable records={todayRecords} /></Card></div>;
+
+  const activeEmployees = employees.filter((emp) => emp.status !== "disabled");
+
+  return <div className="space-y-5">
+    <Card title="員工管理" subtitle="預設顯示員工摘要，點擊修改後才展開詳細資料。">
+      <div className="mb-5 rounded-3xl border border-neutral-200 bg-neutral-50 p-4">
+        <div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="font-bold">手動新增員工</h3><p className="mt-1 text-xs text-neutral-500">LINE ID 可先留空，系統會產生 MANUAL ID。</p></div><button type="button" onClick={() => setCreatingEmployee(!creatingEmployee)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingEmployee ? "收合" : "新增員工"}</button></div>
+        {creatingEmployee && <form onSubmit={createManualEmployee} className="grid gap-3 md:grid-cols-3"><Input label="員工姓名" value={manualEmployeeForm.name} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, name: v })} /><Input label="LINE User ID / 員工ID（可先留空）" value={manualEmployeeForm.lineUserId} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, lineUserId: v })} /><Input label="電話" value={manualEmployeeForm.phone} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, phone: v })} /><Select label="狀態" value={manualEmployeeForm.status} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, status: v })}><option value="pending">待審核</option><option value="active">啟用</option><option value="disabled">停用</option></Select><Select label="權限" value={manualEmployeeForm.role} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, role: v })}><option value="employee">員工</option><option value="manager">管理員</option><option value="owner">老闆</option></Select><Input label="時薪" type="number" value={String(manualEmployeeForm.hourlyWage)} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, hourlyWage: Number(v || 0) })} /><div className="md:col-span-2"><DepartmentCheckboxes label="可支援部門" value={manualEmployeeForm.departments} onChange={(departments) => setManualEmployeeForm({ ...manualEmployeeForm, departments })} /></div><Input label="備註" value={manualEmployeeForm.note} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-3">建立員工資料</button></form>}
+      </div>
+      <div className="space-y-3">{employees.map((emp) => {
+        const isEditing = editingEmployeeId === emp.id;
+        const statusLabel = emp.status === "active" ? "啟用" : emp.status === "pending" ? "待審核" : emp.status === "disabled" ? "停用" : emp.status || "未知";
+        const roleLabel = emp.role === "owner" ? "老闆" : emp.role === "manager" ? "管理員" : "員工";
+        return <div key={emp.id} className="rounded-2xl border bg-white p-3"><div className="grid gap-3 md:grid-cols-[1.5fr_1fr_1fr_1fr_auto_auto] md:items-center"><div><div className="font-bold">{emp.name || emp.displayName || "未命名員工"}</div><div className="break-all text-xs text-neutral-500">{emp.lineUserId || emp.id}</div></div><div className="text-sm"><span className={`rounded-full px-3 py-1 font-bold ${emp.status === "active" ? "bg-green-50 text-green-700" : emp.status === "disabled" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{statusLabel}</span></div><div className="text-sm text-neutral-600">{roleLabel}</div><div className="text-sm text-neutral-600">{getEmployeeDepartments(emp).join("、")}｜${Number(emp.hourlyWage || 0)}/hr</div><button type="button" onClick={() => setEditingEmployeeId(isEditing ? null : emp.id)} className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button type="button" onClick={() => deleteEmployee(emp)} className="rounded-xl bg-red-50 px-4 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-4"><Input label="姓名" value={emp.name || ""} onChange={(v) => updateEmployee(emp, { name: v })} /><Input label="電話" value={emp.phone || ""} onChange={(v) => updateEmployee(emp, { phone: v })} /><Select label="狀態" value={emp.status || "pending"} onChange={(v) => updateEmployee(emp, { status: v })}><option value="pending">待審核</option><option value="active">啟用</option><option value="disabled">停用</option></Select><Select label="權限" value={emp.role || "employee"} onChange={(v) => updateEmployee(emp, { role: v })}><option value="employee">員工</option><option value="manager">管理員</option><option value="owner">老闆</option></Select><div className="md:col-span-2"><DepartmentCheckboxes label="可支援部門" value={getEmployeeDepartments(emp)} onChange={(departments) => updateEmployee(emp, { departments, department: departments[0] || "烘焙坊" })} /></div><Input label="時薪" type="number" value={String(emp.hourlyWage || 0)} onChange={(v) => updateEmployee(emp, { hourlyWage: Number(v || 0) })} /><Input label="備註" value={emp.note || ""} onChange={(v) => updateEmployee(emp, { note: v })} /></div>}</div>;
+      })}</div>
+    </Card>
+
+    <Card title="打卡紀錄管理" subtitle="主管可手動新增、修改、刪除打卡紀錄。">
+      <div className="mb-4 flex justify-end"><button type="button" onClick={() => setCreatingAttendance(!creatingAttendance)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingAttendance ? "收合新增" : "新增打卡紀錄"}</button></div>
+      {creatingAttendance && <form onSubmit={createAttendanceRecord} className="mb-5 grid gap-3 rounded-2xl bg-neutral-50 p-4 md:grid-cols-4"><Select label="員工" value={attendanceForm.employeeId} onChange={(v) => { const emp = getEmployeeByLineId(v); setAttendanceForm({ ...attendanceForm, employeeId: v, department: emp?.department || getEmployeeDepartments(emp)[0] || "烘焙坊" }); }}>{activeEmployees.map((emp) => <option key={emp.id} value={emp.lineUserId || emp.id}>{emp.name || emp.displayName}</option>)}</Select><Select label="部門" value={attendanceForm.department} onChange={(v) => setAttendanceForm({ ...attendanceForm, department: v })}>{DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}</Select><Input label="日期" type="date" value={attendanceForm.date} onChange={(v) => setAttendanceForm({ ...attendanceForm, date: v })} /><Input label="上班" type="time" value={attendanceForm.clockIn} onChange={(v) => setAttendanceForm({ ...attendanceForm, clockIn: v })} /><Input label="下班" type="time" value={attendanceForm.clockOut} onChange={(v) => setAttendanceForm({ ...attendanceForm, clockOut: v })} /><Input label="備註" value={attendanceForm.note} onChange={(v) => setAttendanceForm({ ...attendanceForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-2">建立打卡紀錄</button></form>}
+      <div className="space-y-3">{todayRecords.map((record) => {
+        const isEditing = editingAttendanceId === record.id;
+        return <div key={record.id} className="rounded-2xl border p-3"><div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto_auto] md:items-center"><div className="font-bold">{record.employeeName}</div><div>{record.date}</div><div>{record.clockIn || "-"} - {record.clockOut || "-"}</div><div>{record.workHours || 0} 小時｜{getAttendanceStatusText(record.attendanceStatus)}</div><button onClick={() => setEditingAttendanceId(isEditing ? null : record.id)} className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button onClick={() => deleteAttendanceRecord(record)} className="rounded-xl bg-red-50 px-4 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-5"><Input label="日期" type="date" value={record.date || ""} onChange={(v) => updateAttendanceRecord(record, { date: v })} /><Input label="上班" type="time" value={record.clockIn || ""} onChange={(v) => updateAttendanceRecord(record, { clockIn: v })} /><Input label="下班" type="time" value={record.clockOut || ""} onChange={(v) => updateAttendanceRecord(record, { clockOut: v })} /><Select label="狀態" value={record.attendanceStatus || "normal"} onChange={(v) => updateAttendanceRecord(record, { attendanceStatus: v })}><option value="normal">正常</option><option value="late">遲到</option><option value="earlyLeave">早退</option><option value="lateAndEarlyLeave">遲到＋早退</option><option value="noSchedule">無排班打卡</option><option value="manualCorrection">補卡修正</option></Select><Input label="備註" value={record.note || ""} onChange={(v) => updateAttendanceRecord(record, { note: v })} /></div>}</div>;
+      })}</div>
+    </Card>
+
+    <Card title="補卡審核管理" subtitle="主管可新增、修改、刪除補卡資料，也可通過或退回。">
+      <div className="mb-4 flex justify-end"><button type="button" onClick={() => setCreatingCorrection(!creatingCorrection)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingCorrection ? "收合新增" : "新增補卡資料"}</button></div>
+      {creatingCorrection && <form onSubmit={createCorrectionRequest} className="mb-5 grid gap-3 rounded-2xl bg-neutral-50 p-4 md:grid-cols-4"><Select label="員工" value={correctionForm.employeeId} onChange={(v) => setCorrectionForm({ ...correctionForm, employeeId: v })}>{activeEmployees.map((emp) => <option key={emp.id} value={emp.lineUserId || emp.id}>{emp.name || emp.displayName}</option>)}</Select><Select label="類型" value={correctionForm.type} onChange={(v) => setCorrectionForm({ ...correctionForm, type: v })}><option value="clockIn">補上班卡</option><option value="clockOut">補下班卡</option></Select><Input label="日期" type="date" value={correctionForm.date} onChange={(v) => setCorrectionForm({ ...correctionForm, date: v })} /><Input label="時間" type="time" value={correctionForm.time} onChange={(v) => setCorrectionForm({ ...correctionForm, time: v })} /><Select label="狀態" value={correctionForm.status} onChange={(v) => setCorrectionForm({ ...correctionForm, status: v })}><option value="pending">待審核</option><option value="approved">已通過</option><option value="rejected">已退回</option></Select><Input label="原因" value={correctionForm.reason} onChange={(v) => setCorrectionForm({ ...correctionForm, reason: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-2">建立補卡資料</button></form>}
+      <div className="space-y-3">{corrections.map((item) => {
+        const isEditing = editingCorrectionId === item.id;
+        return <div key={item.id} className="rounded-2xl border p-3"><div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto_auto_auto_auto] md:items-center"><div className="font-bold">{item.employeeName}</div><div>{item.date} {item.time}</div><div>{item.type === "clockIn" ? "補上班" : "補下班"}</div><div>{statusText(item.status)}</div><button onClick={() => reviewCorrection(item, true)} className="rounded-xl bg-green-50 px-3 py-2 text-sm font-bold text-green-700">通過</button><button onClick={() => reviewCorrection(item, false)} className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-700">退回</button><button onClick={() => setEditingCorrectionId(isEditing ? null : item.id)} className="rounded-xl bg-neutral-900 px-3 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button onClick={() => deleteCorrectionRequest(item)} className="rounded-xl bg-red-50 px-3 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-5"><Select label="類型" value={item.type || "clockIn"} onChange={(v) => updateCorrectionRequest(item, { type: v })}><option value="clockIn">補上班卡</option><option value="clockOut">補下班卡</option></Select><Input label="日期" type="date" value={item.date || ""} onChange={(v) => updateCorrectionRequest(item, { date: v })} /><Input label="時間" type="time" value={item.time || ""} onChange={(v) => updateCorrectionRequest(item, { time: v })} /><Select label="狀態" value={item.status || "pending"} onChange={(v) => updateCorrectionRequest(item, { status: v })}><option value="pending">待審核</option><option value="approved">已通過</option><option value="rejected">已退回</option></Select><Input label="原因" value={item.reason || ""} onChange={(v) => updateCorrectionRequest(item, { reason: v })} /></div>}</div>;
+      })}</div>
+    </Card>
+  </div>;
 }
 
 function SchedulePanel({ setGlobalError }) {
