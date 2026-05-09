@@ -49,7 +49,7 @@ const firebaseConfig = {
 
 const DEPARTMENTS = ["烘焙坊", "超市"];
 const DEFAULT_GRACE_MINUTES = 10;
-const DEV_LOGIN_AS = "owner";
+const DEV_LOGIN_AS = "newEmployee";
 const DEV_PROFILES = {
   owner: { userId: OWNER_LINE_USER_IDS[0] || "DEV_OWNER_USER_ID", displayName: "開發測試老闆", pictureUrl: "" },
   newEmployee: { userId: "DEV_NEW_EMPLOYEE_USER_ID", displayName: "新員工測試帳號", pictureUrl: "" },
