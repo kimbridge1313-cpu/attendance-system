@@ -28,13 +28,14 @@ import liff from "@line/liff";
  */
 
 // ===== 🔥 上線設定區（只需要改這裡） =====
-const DEV_MODE = false;
+// 先用 true 測前端與 Firebase；確認畫面正常後，再改 false 接 LIFF
+const DEV_MODE = true;
 const LIFF_ID = "2009896295-aplNwbiH";
 const OWNER_LINE_USER_IDS = ["U0d01ce43203dbcf0d3a94436b60eb232"];
 
 // 👉 你的 Vercel 正式網址，必須跟 LINE LIFF Endpoint URL 完全一致
 // 例：const APP_BASE_URL = "https://attendance-system.vercel.app";
-const APP_BASE_URL = window.location.origin;
+const APP_BASE_URL = typeof window !== "undefined" ? window.location.origin : "";
 // ======================================
 
 const firebaseConfig = {
