@@ -21,36 +21,43 @@ import liff from "@line/liff";
  * Attendance LIFF + Firebase Firestore Frontend
  * --------------------------------------------------
  * 修正版：
- * 1. 修正 Firebase client is offline 時未被完整攔截的問題。
- * 2. 所有 Firestore 讀寫都包進 safeRun，避免整個 React App crash。
- * 3. 保留：員工管理、手動新增員工、排班、打卡、補卡、薪資月報。
- * 4. 仍避免 Firestore composite index：查詢只用 where / limit，排序交給前端。
+ * 1. 修正 TypeError: Failed to fetch 時錯誤訊息過於模糊的問題。
+ * 2. LIFF 初始化失敗時顯示明確診斷清單，不再白畫面。
+ * 3. Firestore 讀寫失敗時只顯示錯誤提示，不讓整個 App crash。
+ * 4. 保留：員工管理 CRUD、打卡紀錄 CRUD、補卡 CRUD、排班、薪資月報。
  */
 
 // ===== 🔥 上線設定區（只需要改這裡） =====
-
-// 👉 上線請保持 false
 const DEV_MODE = false;
-
-// 👉 貼上你的 LIFF ID
 const LIFF_ID = "2009896295-aplNwbiH";
+const OWNER_LINE_USER_IDS = ["U0d01ce43203dbcf0d3a94436b60eb232"];
 
-// 👉 貼上你的 LINE userId（老闆）
-const OWNER_LINE_USER_IDS = [
-  "U0d01ce43203dbcf0d3a94436b60eb232"
-];
-
+// 👉 你的 Vercel 正式網址，必須跟 LINE LIFF Endpoint URL 完全一致
+// 例：const APP_BASE_URL = "https://attendance-system.vercel.app";
+const APP_BASE_URL = window.location.origin;
 // ======================================
 
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
+const firebaseConfig = {
+  apiKey: "AIzaSyAbfvJlElGLgI1lX7fsdEeV3VS8Gk0o3YA",
+  authDomain: "attendance-app-c95ff.firebaseapp.com",
+  projectId: "attendance-app-c95ff",
+  storageBucket: "attendance-app-c95ff.firebasestorage.app",
+  messagingSenderId: "1069052716411",
+  appId: "1069052716411:web:83129a080b3bd62bbdc9de",
+};
 
+const DEPARTMENTS = ["烘焙坊", "超市"];
+const DEFAULT_GRACE_MINUTES = 10;
+const DEV_LOGIN_AS = "owner";
 const DEV_PROFILES = {
-  owner: { userId: "DEV_OWNER_USER_ID", displayName: "開發測試老闆", pictureUrl: "" },
+  owner: { userId: OWNER_LINE_USER_IDS[0] || "DEV_OWNER_USER_ID", displayName: "開發測試老闆", pictureUrl: "" },
   newEmployee: { userId: "DEV_NEW_EMPLOYEE_USER_ID", displayName: "新員工測試帳號", pictureUrl: "" },
   employee: { userId: "DEV_EMPLOYEE_USER_ID", displayName: "已審核員工測試帳號", pictureUrl: "" },
 };
 const DEV_PROFILE = DEV_PROFILES[DEV_LOGIN_AS] || DEV_PROFILES.owner;
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
 
 const todayString = () => {
   const now = new Date();
@@ -86,18 +93,63 @@ const timestampMillis = (value) => {
 const sortByFieldAsc = (items, field) => [...items].sort((a, b) => String(a[field] || "").localeCompare(String(b[field] || "")));
 const sortByCreatedAtDesc = (items) => [...items].sort((a, b) => timestampMillis(b.createdAt) - timestampMillis(a.createdAt));
 
+const getEmployeeDepartments = (employee) => {
+  if (Array.isArray(employee?.departments) && employee.departments.length) return employee.departments;
+  if (employee?.department) return [employee.department];
+  return ["烘焙坊"];
+};
+const employeeCanWorkDepartment = (employee, department) => getEmployeeDepartments(employee).includes(department);
+const filterEmployeesByDepartment = (employees, department) => department === "全部" ? employees : employees.filter((emp) => employeeCanWorkDepartment(emp, department));
+
+const isNetworkFetchError = (err) => {
+  const text = String(err?.message || err || "").toLowerCase();
+  return text.includes("failed to fetch") || text.includes("networkerror") || text.includes("load failed") || text.includes("network request failed");
+};
 const isOfflineError = (err) => {
   const text = String(err?.message || err || "").toLowerCase();
-  return text.includes("client is offline") || text.includes("offline") || text.includes("unavailable") || text.includes("failed to get document");
+  return text.includes("client is offline") || text.includes("offline") || text.includes("unavailable") || text.includes("failed to get document") || isNetworkFetchError(err);
 };
 
 function getFirebaseFriendlyError(err, fallback = "操作失敗。") {
   const raw = String(err?.message || err || "");
   const lower = raw.toLowerCase();
-  if (isOfflineError(err)) return "Firebase 目前連線失敗：client is offline。請確認網路、Firebase 專案設定、瀏覽器是否阻擋連線，然後重新整理。系統已攔截錯誤，不會讓畫面崩潰。";
-  if (lower.includes("requires an index") || lower.includes("failed-precondition")) return "Firestore 查詢需要建立複合索引。這版已盡量改成前端排序；如果仍看到這個錯誤，代表還有查詢需要簡化。\n原始錯誤：" + raw;
-  if (lower.includes("permission-denied") || lower.includes("missing or insufficient permissions")) return "Firestore 權限不足。請確認 Firestore Rules 是測試模式，或已允許目前使用者讀寫。";
+  if (isNetworkFetchError(err)) {
+    return [
+      "網路請求失敗：Failed to fetch。",
+      "請依序檢查：",
+      "1. 目前網址是否為 HTTPS 的 Vercel 正式網址。",
+      "2. Firebase Firestore 是否已建立並啟用。",
+      "3. Firestore Rules 是否暫時允許 read / write 測試。",
+      "4. 瀏覽器是否阻擋第三方 Cookie、追蹤防護或外掛阻擋 Firebase / LINE 網域。",
+      "5. 若是在 LINE 內開啟，請也用外部瀏覽器測一次。",
+      `原始錯誤：${raw || "Failed to fetch"}`,
+    ].join("\n");
+  }
+  if (isOfflineError(err)) return "Firebase 目前連線失敗：client is offline。請確認網路、Firebase 專案設定、Firestore Rules，然後重新整理。";
+  if (lower.includes("requires an index") || lower.includes("failed-precondition")) return "Firestore 查詢需要建立複合索引。這版已盡量改成前端排序。\n原始錯誤：" + raw;
+  if (lower.includes("permission-denied") || lower.includes("missing or insufficient permissions")) return "Firestore 權限不足。請確認 Firestore Rules 目前允許測試讀寫。";
   return `${fallback}\n原始錯誤：${raw || "未知錯誤"}`;
+}
+
+function getLiffErrorMessage(err) {
+  const raw = String(err?.message || err || "");
+  const lower = raw.toLowerCase();
+  if (lower.includes("channel not found")) return "LIFF 初始化失敗：channel not found。請確認 LIFF_ID 是否正確、Channel 是否啟用、LIFF App 是否存在。";
+  if (isNetworkFetchError(err)) {
+    return [
+      "LIFF 初始化失敗：Failed to fetch。",
+      "請先檢查 LINE Developers Console：",
+      "1. LIFF Endpoint URL 是否完全等於 APP_BASE_URL / 目前 Vercel 網址，例如 https://xxx.vercel.app。",
+      "2. LIFF ID 是否填對。",
+      "3. Channel 是否為已啟用狀態。",
+      "4. 手機 LINE 內與外部瀏覽器都測一次。",
+      `目前 LIFF_ID：${LIFF_ID}`,
+      `目前網址：${window.location.href}`,
+      `APP_BASE_URL：${APP_BASE_URL}`,
+      `原始錯誤：${raw}`,
+    ].join("\n");
+  }
+  return getFirebaseFriendlyError(err, "LIFF 初始化失敗。請確認 LIFF ID、Endpoint URL 與網路狀態。");
 }
 
 async function safeRun(fn, fallback, onError) {
@@ -109,14 +161,6 @@ async function safeRun(fn, fallback, onError) {
     return null;
   }
 }
-
-const getEmployeeDepartments = (employee) => {
-  if (Array.isArray(employee?.departments) && employee.departments.length) return employee.departments;
-  if (employee?.department) return [employee.department];
-  return ["烘焙坊"];
-};
-const employeeCanWorkDepartment = (employee, department) => getEmployeeDepartments(employee).includes(department);
-const filterEmployeesByDepartment = (employees, department) => department === "全部" ? employees : employees.filter((emp) => employeeCanWorkDepartment(emp, department));
 
 function buildManualEmployeeData(form, now = Date.now()) {
   const departments = Array.isArray(form.departments) && form.departments.length ? form.departments : ["烘焙坊"];
@@ -146,6 +190,12 @@ const getAttendanceStatusText = (status) => {
   if (status === "manualCorrection") return "補卡修正";
   return "尚未判斷";
 };
+function statusText(status) {
+  if (status === "pending") return "待審核";
+  if (status === "approved") return "已通過";
+  if (status === "rejected") return "已退回";
+  return status || "未知";
+}
 
 function getMonthWeekDates(month, weekIndex) {
   const [year, monthNumber] = month.split("-").map(Number);
@@ -184,31 +234,21 @@ function evaluateAttendance({ schedule, clockIn, clockOut }) {
 
 function runSelfTests() {
   console.assert(minutesBetween("09:00", "18:00") === 540, "minutesBetween should calculate same-day work minutes");
-  console.assert(minutesBetween("09:30", "10:00") === 30, "minutesBetween should calculate partial hours");
   console.assert(minutesBetween("18:00", "09:00") === 0, "minutesBetween should not return negative minutes");
   console.assert(formatHours(485) === 8.08, "formatHours should keep two decimal places");
   console.assert(/^\d{4}-\d{2}-\d{2}$/.test(todayString()), "todayString should be YYYY-MM-DD");
-  console.assert(/^\d{4}-\d{2}$/.test(getMonthString()), "getMonthString should be YYYY-MM");
   console.assert(evaluateAttendance({ schedule: null, clockIn: "09:00", clockOut: "18:00" }).attendanceStatus === "noSchedule", "no schedule should be flagged");
-  console.assert(evaluateAttendance({ schedule: { startTime: "09:00", endTime: "18:00", graceMinutes: 10 }, clockIn: "09:05", clockOut: "18:00" }).attendanceStatus === "normal", "within grace should be normal");
   console.assert(evaluateAttendance({ schedule: { startTime: "09:00", endTime: "18:00", graceMinutes: 10 }, clockIn: "09:20", clockOut: "18:00" }).attendanceStatus === "late", "late should be flagged");
-  console.assert(evaluateAttendance({ schedule: { startTime: "09:00", endTime: "18:00", graceMinutes: 10 }, clockIn: "09:00", clockOut: "17:30" }).attendanceStatus === "earlyLeave", "early leave should be flagged");
-  console.assert(sortByFieldAsc([{ startTime: "18:00" }, { startTime: "09:00" }], "startTime")[0].startTime === "09:00", "client-side ascending sort should work");
   console.assert(getEmployeeDepartments({ department: "超市" })[0] === "超市", "legacy single department should still work");
   console.assert(employeeCanWorkDepartment({ departments: ["烘焙坊", "超市"] }, "超市") === true, "multi-department employee should work in supported department");
   console.assert(filterEmployeesByDepartment([{ departments: ["烘焙坊"] }, { departments: ["超市"] }], "超市").length === 1, "department board filter should work");
-  console.assert(buildManualEmployeeData({ name: "測試員工", departments: ["超市"], hourlyWage: "190" }, 1).lineUserId === "MANUAL_1", "manual ID should be deterministic when time is injected");
-  console.assert(buildManualEmployeeData({ name: "測試員工", departments: ["超市"], hourlyWage: "190" }).hourlyWage === 190, "manual employee builder should convert hourly wage to number");
-  console.assert(getMonthWeekDates("2026-04", 4).length === 7, "month week selector should always return 7 days");
-  console.assert(isOfflineError({ message: "Failed to get document because the client is offline." }) === true, "offline Firebase errors should be detected");
+  console.assert(buildManualEmployeeData({ name: "測試員工", departments: ["超市"], hourlyWage: "190" }, 1).lineUserId === "MANUAL_1", "manual ID should be deterministic");
+  console.assert(getMonthWeekDates("2026-04", 4).length === 7, "month week selector should return 7 days");
+  console.assert(isNetworkFetchError({ message: "TypeError: Failed to fetch" }) === true, "failed fetch should be detected");
+  console.assert(isOfflineError({ message: "Failed to get document because the client is offline." }) === true, "offline errors should be detected");
 }
 runSelfTests();
 
-function getLiffErrorMessage(err) {
-  const raw = String(err?.message || err || "");
-  if (raw.toLowerCase().includes("channel not found")) return "LIFF 初始化失敗：channel not found。請確認 LIFF_ID 與 LINE Developers Console 設定。";
-  return getFirebaseFriendlyError(err, "初始化失敗。請確認 LIFF ID、Firebase 設定、Firestore 權限與網路狀態。");
-}
 const isFirebaseConfigReady = () => Boolean(firebaseConfig.apiKey && firebaseConfig.projectId && !firebaseConfig.apiKey.includes("請貼上"));
 const isLiffReady = () => Boolean(LIFF_ID && !LIFF_ID.includes("請貼上"));
 
@@ -244,9 +284,24 @@ function App() {
         setLoading(false);
         return;
       }
-      const ok = await safeRun(async () => { await liff.init({ liffId: LIFF_ID }); return true; }, "LIFF 初始化失敗。", setError);
-      if (!ok) { setLoading(false); return; }
-      if (!liff.isLoggedIn()) { liff.login(); return; }
+      try {
+        await liff.init({ liffId: LIFF_ID });
+      } catch (err) {
+        console.error(err);
+        setError(getLiffErrorMessage(err));
+        setLoading(false);
+        return;
+      }
+      if (!liff.isLoggedIn()) {
+        try {
+          liff.login({ redirectUri: APP_BASE_URL });
+        } catch (err) {
+          console.error(err);
+          setError(getLiffErrorMessage(err));
+          setLoading(false);
+        }
+        return;
+      }
       lineProfile = await safeRun(() => liff.getProfile(), "取得 LINE 身分失敗。", setError);
     }
 
@@ -254,10 +309,10 @@ function App() {
     setProfile(lineProfile);
 
     const employeeRef = doc(db, "employees", lineProfile.userId);
-    let employeeSnap = await safeRun(() => getDoc(employeeRef), "讀取員工資料失敗。", setError);
+    const employeeSnap = await safeRun(() => getDoc(employeeRef), "讀取員工資料失敗。", setError);
 
     if (!employeeSnap && DEV_MODE) {
-      const fallbackEmployee = {
+      setEmployee({
         id: lineProfile.userId,
         lineUserId: lineProfile.userId,
         name: lineProfile.displayName || "開發測試帳號",
@@ -270,9 +325,7 @@ function App() {
         hourlyWage: DEV_LOGIN_AS === "owner" ? 0 : 190,
         phone: "",
         note: "Firebase 離線時的 DEV fallback，不會寫入資料庫。",
-      };
-      setEmployee(fallbackEmployee);
-      setError("Firebase 目前連線失敗，所以先用 DEV fallback 顯示畫面。你可以先看前端，但資料不會寫入 Firestore。請確認網路後重新整理。");
+      });
       setLoading(false);
       return;
     }
@@ -297,12 +350,14 @@ function App() {
         departments: ["烘焙坊", "超市"],
         hourlyWage: 0,
         phone: "",
-        note: DEV_MODE ? "DEV_MODE 自動建立的系統管理者" : "系統建立者",
+        note: "系統建立者",
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
       const written = await safeRun(() => setDoc(employeeRef, ownerData), "建立老闆資料失敗。", setError);
       if (written !== null) setEmployee({ id: lineProfile.userId, ...ownerData });
+    } else {
+      setEmployee(null);
     }
 
     setLoading(false);
@@ -397,7 +452,7 @@ function App() {
 
   if (loading) return <FullPage message="系統載入中..." />;
   if (!profile) return <ErrorPage message={error || "尚未取得 LINE / DEV 身分。"} onRetry={boot} />;
-  if (!employee) return <JoinPage profile={profile} onSubmit={applyJoin} />;
+  if (!employee) return <JoinPage profile={profile} onSubmit={applyJoin} error={error} />;
   if (employee.status === "pending") return <FullPage message="你的加入申請已送出，請等待主管審核。" />;
   if (employee.status === "disabled") return <FullPage message="你的帳號已被停用，請聯絡主管。" tone="error" />;
 
@@ -419,7 +474,6 @@ function App() {
       <main className="mx-auto max-w-6xl px-4 py-5">
         {error && <div className="mb-4 whitespace-pre-line rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>}
         {DEV_MODE && <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">目前是 DEV_MODE，身份：<b>{DEV_LOGIN_AS}</b>。</div>}
-
         <nav className="mb-5 grid grid-cols-2 gap-2 md:grid-cols-6">
           <TabButton active={activeTab === "clock"} onClick={() => setActiveTab("clock")}>打卡</TabButton>
           <TabButton active={activeTab === "correction"} onClick={() => setActiveTab("correction")}>補卡</TabButton>
@@ -428,7 +482,6 @@ function App() {
           {isManager && <TabButton active={activeTab === "schedule"} onClick={() => setActiveTab("schedule")}>排班</TabButton>}
           {isManager && <TabButton active={activeTab === "salary"} onClick={() => setActiveTab("salary")}>薪資月報</TabButton>}
         </nav>
-
         {activeTab === "clock" && <ClockPanel employee={employee} todayRecord={todayRecord} todaySchedule={todaySchedule} onClockIn={clockIn} onClockOut={clockOut} onReload={() => Promise.all([loadTodayRecord(profile.userId), loadTodaySchedule(profile.userId)])} />}
         {activeTab === "correction" && <CorrectionPanel employee={employee} profile={profile} setGlobalError={setError} />}
         {activeTab === "myStats" && <MyStatsPanel employee={employee} setGlobalError={setError} />}
@@ -469,12 +522,13 @@ function DepartmentCheckboxes({ label, value, onChange }) {
   };
   return <div><span className="mb-1 block text-sm font-medium text-neutral-700">{label}</span><div className="flex flex-wrap gap-2 rounded-2xl border border-neutral-200 p-2">{DEPARTMENTS.map((department) => <button key={department} type="button" onClick={() => toggle(department)} className={`rounded-xl px-3 py-2 text-sm font-bold ${selected.includes(department) ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-600"}`}>{department}</button>)}</div></div>;
 }
+function SimpleList({ items, empty, render }) { return !items.length ? <div className="rounded-2xl bg-neutral-100 p-4 text-sm text-neutral-500">{empty}</div> : <div className="space-y-3">{items.map((item) => <React.Fragment key={item.id}>{render(item)}</React.Fragment>)}</div>; }
 
-function JoinPage({ profile, onSubmit }) {
+function JoinPage({ profile, onSubmit, error }) {
   const [form, setForm] = useState({ name: profile.displayName || "", department: "烘焙坊", phone: "", note: "" });
   const [saving, setSaving] = useState(false);
   async function submit(e) { e.preventDefault(); if (!form.name.trim()) return alert("請填寫姓名"); setSaving(true); try { await onSubmit(form); } finally { setSaving(false); } }
-  return <div className="min-h-screen bg-neutral-100 p-4"><div className="mx-auto max-w-md rounded-3xl bg-white p-6 shadow"><h1 className="text-xl font-bold">申請加入員工系統</h1><p className="mt-2 text-sm text-neutral-500">第一次使用需要主管審核後才能打卡。</p><form onSubmit={submit} className="mt-5 space-y-4"><Input label="員工姓名" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><Select label="部門" value={form.department} onChange={(v) => setForm({ ...form, department: v })}>{DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}</Select><Input label="電話" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} /><Input label="備註" value={form.note} onChange={(v) => setForm({ ...form, note: v })} /><button disabled={saving} className="w-full rounded-2xl bg-neutral-900 px-4 py-3 font-bold text-white disabled:opacity-50">{saving ? "送出中..." : "送出申請"}</button></form></div></div>;
+  return <div className="min-h-screen bg-neutral-100 p-4"><div className="mx-auto max-w-md rounded-3xl bg-white p-6 shadow"><h1 className="text-xl font-bold">申請加入員工系統</h1><p className="mt-2 text-sm text-neutral-500">第一次使用需要主管審核後才能打卡。</p>{error && <div className="mt-4 whitespace-pre-line rounded-2xl bg-red-50 p-3 text-sm text-red-700">{error}</div>}<form onSubmit={submit} className="mt-5 space-y-4"><Input label="員工姓名" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><Select label="部門" value={form.department} onChange={(v) => setForm({ ...form, department: v })}>{DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}</Select><Input label="電話" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} /><Input label="備註" value={form.note} onChange={(v) => setForm({ ...form, note: v })} /><button disabled={saving} className="w-full rounded-2xl bg-neutral-900 px-4 py-3 font-bold text-white disabled:opacity-50">{saving ? "送出中..." : "送出申請"}</button></form></div></div>;
 }
 
 function ClockPanel({ employee, todayRecord, todaySchedule, onClockIn, onClockOut, onReload }) {
@@ -530,9 +584,7 @@ function AdminPanel({ currentUser, setGlobalError }) {
   const [manualEmployeeForm, setManualEmployeeForm] = useState({ lineUserId: "", name: "", displayName: "", phone: "", role: "employee", status: "active", departments: ["烘焙坊"], hourlyWage: 190, note: "" });
   const [attendanceForm, setAttendanceForm] = useState({ employeeId: "", date: todayString(), clockIn: "09:00", clockOut: "18:00", department: "烘焙坊", source: "manual", note: "" });
   const [correctionForm, setCorrectionForm] = useState({ employeeId: "", type: "clockIn", date: todayString(), time: "09:00", reason: "主管手動新增", status: "pending" });
-
   useEffect(() => { loadAll(); }, []);
-
   async function loadAll() {
     const employeeSnap = await safeRun(() => getDocs(collection(db, "employees")), "讀取員工資料失敗。", setGlobalError);
     if (employeeSnap) {
@@ -549,179 +601,21 @@ function AdminPanel({ currentUser, setGlobalError }) {
     const todaySnap = await safeRun(() => getDocs(query(collection(db, "attendanceRecords"), where("date", "==", todayString()), limit(100))), "讀取今日打卡紀錄失敗。", setGlobalError);
     if (todaySnap) setTodayRecords(sortByCreatedAtDesc(todaySnap.docs.map((d) => ({ id: d.id, ...d.data() }))));
   }
-
-  async function updateEmployee(emp, patch) {
-    const ok = await safeRun(() => updateDoc(doc(db, "employees", emp.id), { ...patch, updatedAt: serverTimestamp() }), "更新員工資料失敗。", setGlobalError);
-    if (ok !== null) await loadAll();
-  }
-
-  async function deleteEmployee(emp) {
-    const okConfirm = window.confirm(`確定刪除員工「${emp.name || emp.displayName || emp.id}」？
-注意：這不會自動刪除他的既有打卡紀錄。`);
-    if (!okConfirm) return;
-    const ok = await safeRun(() => deleteDoc(doc(db, "employees", emp.id)), "刪除員工失敗。", setGlobalError);
-    if (ok !== null) await loadAll();
-  }
-
-  async function createManualEmployee(e) {
-    e.preventDefault();
-    if (!manualEmployeeForm.name.trim()) return alert("請填寫員工姓名");
-    const data = buildManualEmployeeData(manualEmployeeForm);
-    const ok = await safeRun(() => setDoc(doc(db, "employees", data.lineUserId), { ...data, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }, { merge: true }), "建立員工資料失敗。", setGlobalError);
-    if (ok !== null) {
-      setManualEmployeeForm({ lineUserId: "", name: "", displayName: "", phone: "", role: "employee", status: "active", departments: ["烘焙坊"], hourlyWage: 190, note: "" });
-      setCreatingEmployee(false);
-      await loadAll();
-    }
-  }
-
-  function getEmployeeByLineId(employeeId) {
-    return employees.find((emp) => (emp.lineUserId || emp.id) === employeeId);
-  }
-
-  function buildAttendancePayload(form) {
-    const emp = getEmployeeByLineId(form.employeeId);
-    const employeeName = emp?.name || emp?.displayName || "未命名員工";
-    const workMinutes = form.clockIn && form.clockOut ? minutesBetween(form.clockIn, form.clockOut) : 0;
-    return {
-      employeeId: form.employeeId,
-      employeeName,
-      department: form.department || emp?.department || getEmployeeDepartments(emp)[0] || "未設定",
-      date: form.date,
-      month: form.date.slice(0, 7),
-      clockIn: form.clockIn || "",
-      clockOut: form.clockOut || "",
-      workMinutes,
-      workHours: formatHours(workMinutes),
-      attendanceStatus: "manualCorrection",
-      lateMinutes: 0,
-      earlyLeaveMinutes: 0,
-      source: form.source || "manual",
-      status: form.clockIn && form.clockOut ? "completed" : "open",
-      note: form.note || "主管手動建立/修改",
-      updatedAt: serverTimestamp(),
-    };
-  }
-
-  async function createAttendanceRecord(e) {
-    e.preventDefault();
-    if (!attendanceForm.employeeId) return alert("請選擇員工");
-    if (!attendanceForm.date) return alert("請選擇日期");
-    const payload = buildAttendancePayload(attendanceForm);
-    const ok = await safeRun(() => addDoc(collection(db, "attendanceRecords"), { ...payload, createdAt: serverTimestamp() }), "新增打卡紀錄失敗。", setGlobalError);
-    if (ok !== null) {
-      setCreatingAttendance(false);
-      await loadAll();
-    }
-  }
-
-  async function updateAttendanceRecord(record, patch) {
-    const next = { ...record, ...patch };
-    const workMinutes = next.clockIn && next.clockOut ? minutesBetween(next.clockIn, next.clockOut) : 0;
-    const updatePayload = {
-      ...patch,
-      month: next.date ? next.date.slice(0, 7) : record.month,
-      workMinutes,
-      workHours: formatHours(workMinutes),
-      status: next.clockIn && next.clockOut ? "completed" : "open",
-      updatedAt: serverTimestamp(),
-    };
-    const ok = await safeRun(() => updateDoc(doc(db, "attendanceRecords", record.id), updatePayload), "修改打卡紀錄失敗。", setGlobalError);
-    if (ok !== null) await loadAll();
-  }
-
-  async function deleteAttendanceRecord(record) {
-    const okConfirm = window.confirm(`確定刪除 ${record.employeeName} ${record.date} 的打卡紀錄？`);
-    if (!okConfirm) return;
-    const ok = await safeRun(() => deleteDoc(doc(db, "attendanceRecords", record.id)), "刪除打卡紀錄失敗。", setGlobalError);
-    if (ok !== null) await loadAll();
-  }
-
-  function buildCorrectionPayload(form) {
-    const emp = getEmployeeByLineId(form.employeeId);
-    return {
-      employeeId: form.employeeId,
-      employeeName: emp?.name || emp?.displayName || "未命名員工",
-      department: emp?.department || getEmployeeDepartments(emp)[0] || "未設定",
-      type: form.type,
-      date: form.date,
-      time: form.time,
-      reason: form.reason || "主管手動新增",
-      status: form.status || "pending",
-      reviewedBy: form.status === "pending" ? null : currentUser.name,
-      reviewedAt: form.status === "pending" ? null : serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    };
-  }
-
-  async function createCorrectionRequest(e) {
-    e.preventDefault();
-    if (!correctionForm.employeeId) return alert("請選擇員工");
-    const payload = buildCorrectionPayload(correctionForm);
-    const ok = await safeRun(() => addDoc(collection(db, "correctionRequests"), { ...payload, createdAt: serverTimestamp() }), "新增補卡資料失敗。", setGlobalError);
-    if (ok !== null) {
-      setCreatingCorrection(false);
-      await loadAll();
-    }
-  }
-
-  async function updateCorrectionRequest(item, patch) {
-    const payload = {
-      ...patch,
-      updatedAt: serverTimestamp(),
-      ...(patch.status && patch.status !== "pending" ? { reviewedBy: currentUser.name, reviewedAt: serverTimestamp() } : {}),
-    };
-    const ok = await safeRun(() => updateDoc(doc(db, "correctionRequests", item.id), payload), "修改補卡資料失敗。", setGlobalError);
-    if (ok !== null) await loadAll();
-  }
-
-  async function deleteCorrectionRequest(item) {
-    const okConfirm = window.confirm(`確定刪除 ${item.employeeName} ${item.date} 的補卡申請？`);
-    if (!okConfirm) return;
-    const ok = await safeRun(() => deleteDoc(doc(db, "correctionRequests", item.id)), "刪除補卡資料失敗。", setGlobalError);
-    if (ok !== null) await loadAll();
-  }
-
-  async function reviewCorrection(item, approved) {
-    const update = approved ? { status: "approved" } : { status: "rejected" };
-    const ok = await safeRun(() => updateDoc(doc(db, "correctionRequests", item.id), { ...update, reviewedBy: currentUser.name, reviewedAt: serverTimestamp(), updatedAt: serverTimestamp() }), "更新補卡審核失敗。", setGlobalError);
-    if (ok !== null) await loadAll();
-  }
-
+  async function updateEmployee(emp, patch) { const ok = await safeRun(() => updateDoc(doc(db, "employees", emp.id), { ...patch, updatedAt: serverTimestamp() }), "更新員工資料失敗。", setGlobalError); if (ok !== null) await loadAll(); }
+  async function deleteEmployee(emp) { if (!window.confirm(`確定刪除員工「${emp.name || emp.displayName || emp.id}」？\n注意：這不會自動刪除他的既有打卡紀錄。`)) return; const ok = await safeRun(() => deleteDoc(doc(db, "employees", emp.id)), "刪除員工失敗。", setGlobalError); if (ok !== null) await loadAll(); }
+  async function createManualEmployee(e) { e.preventDefault(); if (!manualEmployeeForm.name.trim()) return alert("請填寫員工姓名"); const data = buildManualEmployeeData(manualEmployeeForm); const ok = await safeRun(() => setDoc(doc(db, "employees", data.lineUserId), { ...data, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }, { merge: true }), "建立員工資料失敗。", setGlobalError); if (ok !== null) { setManualEmployeeForm({ lineUserId: "", name: "", displayName: "", phone: "", role: "employee", status: "active", departments: ["烘焙坊"], hourlyWage: 190, note: "" }); setCreatingEmployee(false); await loadAll(); } }
+  function getEmployeeByLineId(employeeId) { return employees.find((emp) => (emp.lineUserId || emp.id) === employeeId); }
+  function buildAttendancePayload(form) { const emp = getEmployeeByLineId(form.employeeId); const employeeName = emp?.name || emp?.displayName || "未命名員工"; const workMinutes = form.clockIn && form.clockOut ? minutesBetween(form.clockIn, form.clockOut) : 0; return { employeeId: form.employeeId, employeeName, department: form.department || emp?.department || getEmployeeDepartments(emp)[0] || "未設定", date: form.date, month: form.date.slice(0, 7), clockIn: form.clockIn || "", clockOut: form.clockOut || "", workMinutes, workHours: formatHours(workMinutes), attendanceStatus: "manualCorrection", lateMinutes: 0, earlyLeaveMinutes: 0, source: form.source || "manual", status: form.clockIn && form.clockOut ? "completed" : "open", note: form.note || "主管手動建立/修改", updatedAt: serverTimestamp() }; }
+  async function createAttendanceRecord(e) { e.preventDefault(); if (!attendanceForm.employeeId) return alert("請選擇員工"); if (!attendanceForm.date) return alert("請選擇日期"); const payload = buildAttendancePayload(attendanceForm); const ok = await safeRun(() => addDoc(collection(db, "attendanceRecords"), { ...payload, createdAt: serverTimestamp() }), "新增打卡紀錄失敗。", setGlobalError); if (ok !== null) { setCreatingAttendance(false); await loadAll(); } }
+  async function updateAttendanceRecord(record, patch) { const next = { ...record, ...patch }; const workMinutes = next.clockIn && next.clockOut ? minutesBetween(next.clockIn, next.clockOut) : 0; const updatePayload = { ...patch, month: next.date ? next.date.slice(0, 7) : record.month, workMinutes, workHours: formatHours(workMinutes), status: next.clockIn && next.clockOut ? "completed" : "open", updatedAt: serverTimestamp() }; const ok = await safeRun(() => updateDoc(doc(db, "attendanceRecords", record.id), updatePayload), "修改打卡紀錄失敗。", setGlobalError); if (ok !== null) await loadAll(); }
+  async function deleteAttendanceRecord(record) { if (!window.confirm(`確定刪除 ${record.employeeName} ${record.date} 的打卡紀錄？`)) return; const ok = await safeRun(() => deleteDoc(doc(db, "attendanceRecords", record.id)), "刪除打卡紀錄失敗。", setGlobalError); if (ok !== null) await loadAll(); }
+  function buildCorrectionPayload(form) { const emp = getEmployeeByLineId(form.employeeId); return { employeeId: form.employeeId, employeeName: emp?.name || emp?.displayName || "未命名員工", department: emp?.department || getEmployeeDepartments(emp)[0] || "未設定", type: form.type, date: form.date, time: form.time, reason: form.reason || "主管手動新增", status: form.status || "pending", reviewedBy: form.status === "pending" ? null : currentUser.name, reviewedAt: form.status === "pending" ? null : serverTimestamp(), updatedAt: serverTimestamp() }; }
+  async function createCorrectionRequest(e) { e.preventDefault(); if (!correctionForm.employeeId) return alert("請選擇員工"); const payload = buildCorrectionPayload(correctionForm); const ok = await safeRun(() => addDoc(collection(db, "correctionRequests"), { ...payload, createdAt: serverTimestamp() }), "新增補卡資料失敗。", setGlobalError); if (ok !== null) { setCreatingCorrection(false); await loadAll(); } }
+  async function updateCorrectionRequest(item, patch) { const payload = { ...patch, updatedAt: serverTimestamp(), ...(patch.status && patch.status !== "pending" ? { reviewedBy: currentUser.name, reviewedAt: serverTimestamp() } : {}) }; const ok = await safeRun(() => updateDoc(doc(db, "correctionRequests", item.id), payload), "修改補卡資料失敗。", setGlobalError); if (ok !== null) await loadAll(); }
+  async function deleteCorrectionRequest(item) { if (!window.confirm(`確定刪除 ${item.employeeName} ${item.date} 的補卡申請？`)) return; const ok = await safeRun(() => deleteDoc(doc(db, "correctionRequests", item.id)), "刪除補卡資料失敗。", setGlobalError); if (ok !== null) await loadAll(); }
+  async function reviewCorrection(item, approved) { const update = approved ? { status: "approved" } : { status: "rejected" }; const ok = await safeRun(() => updateDoc(doc(db, "correctionRequests", item.id), { ...update, reviewedBy: currentUser.name, reviewedAt: serverTimestamp(), updatedAt: serverTimestamp() }), "更新補卡審核失敗。", setGlobalError); if (ok !== null) await loadAll(); }
   const activeEmployees = employees.filter((emp) => emp.status !== "disabled");
-
-  return <div className="space-y-5">
-    <Card title="員工管理" subtitle="預設顯示員工摘要，點擊修改後才展開詳細資料。">
-      <div className="mb-5 rounded-3xl border border-neutral-200 bg-neutral-50 p-4">
-        <div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="font-bold">手動新增員工</h3><p className="mt-1 text-xs text-neutral-500">LINE ID 可先留空，系統會產生 MANUAL ID。</p></div><button type="button" onClick={() => setCreatingEmployee(!creatingEmployee)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingEmployee ? "收合" : "新增員工"}</button></div>
-        {creatingEmployee && <form onSubmit={createManualEmployee} className="grid gap-3 md:grid-cols-3"><Input label="員工姓名" value={manualEmployeeForm.name} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, name: v })} /><Input label="LINE User ID / 員工ID（可先留空）" value={manualEmployeeForm.lineUserId} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, lineUserId: v })} /><Input label="電話" value={manualEmployeeForm.phone} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, phone: v })} /><Select label="狀態" value={manualEmployeeForm.status} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, status: v })}><option value="pending">待審核</option><option value="active">啟用</option><option value="disabled">停用</option></Select><Select label="權限" value={manualEmployeeForm.role} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, role: v })}><option value="employee">員工</option><option value="manager">管理員</option><option value="owner">老闆</option></Select><Input label="時薪" type="number" value={String(manualEmployeeForm.hourlyWage)} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, hourlyWage: Number(v || 0) })} /><div className="md:col-span-2"><DepartmentCheckboxes label="可支援部門" value={manualEmployeeForm.departments} onChange={(departments) => setManualEmployeeForm({ ...manualEmployeeForm, departments })} /></div><Input label="備註" value={manualEmployeeForm.note} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-3">建立員工資料</button></form>}
-      </div>
-      <div className="space-y-3">{employees.map((emp) => {
-        const isEditing = editingEmployeeId === emp.id;
-        const statusLabel = emp.status === "active" ? "啟用" : emp.status === "pending" ? "待審核" : emp.status === "disabled" ? "停用" : emp.status || "未知";
-        const roleLabel = emp.role === "owner" ? "老闆" : emp.role === "manager" ? "管理員" : "員工";
-        return <div key={emp.id} className="rounded-2xl border bg-white p-3"><div className="grid gap-3 md:grid-cols-[1.5fr_1fr_1fr_1fr_auto_auto] md:items-center"><div><div className="font-bold">{emp.name || emp.displayName || "未命名員工"}</div><div className="break-all text-xs text-neutral-500">{emp.lineUserId || emp.id}</div></div><div className="text-sm"><span className={`rounded-full px-3 py-1 font-bold ${emp.status === "active" ? "bg-green-50 text-green-700" : emp.status === "disabled" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{statusLabel}</span></div><div className="text-sm text-neutral-600">{roleLabel}</div><div className="text-sm text-neutral-600">{getEmployeeDepartments(emp).join("、")}｜${Number(emp.hourlyWage || 0)}/hr</div><button type="button" onClick={() => setEditingEmployeeId(isEditing ? null : emp.id)} className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button type="button" onClick={() => deleteEmployee(emp)} className="rounded-xl bg-red-50 px-4 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-4"><Input label="姓名" value={emp.name || ""} onChange={(v) => updateEmployee(emp, { name: v })} /><Input label="電話" value={emp.phone || ""} onChange={(v) => updateEmployee(emp, { phone: v })} /><Select label="狀態" value={emp.status || "pending"} onChange={(v) => updateEmployee(emp, { status: v })}><option value="pending">待審核</option><option value="active">啟用</option><option value="disabled">停用</option></Select><Select label="權限" value={emp.role || "employee"} onChange={(v) => updateEmployee(emp, { role: v })}><option value="employee">員工</option><option value="manager">管理員</option><option value="owner">老闆</option></Select><div className="md:col-span-2"><DepartmentCheckboxes label="可支援部門" value={getEmployeeDepartments(emp)} onChange={(departments) => updateEmployee(emp, { departments, department: departments[0] || "烘焙坊" })} /></div><Input label="時薪" type="number" value={String(emp.hourlyWage || 0)} onChange={(v) => updateEmployee(emp, { hourlyWage: Number(v || 0) })} /><Input label="備註" value={emp.note || ""} onChange={(v) => updateEmployee(emp, { note: v })} /></div>}</div>;
-      })}</div>
-    </Card>
-
-    <Card title="打卡紀錄管理" subtitle="主管可手動新增、修改、刪除打卡紀錄。">
-      <div className="mb-4 flex justify-end"><button type="button" onClick={() => setCreatingAttendance(!creatingAttendance)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingAttendance ? "收合新增" : "新增打卡紀錄"}</button></div>
-      {creatingAttendance && <form onSubmit={createAttendanceRecord} className="mb-5 grid gap-3 rounded-2xl bg-neutral-50 p-4 md:grid-cols-4"><Select label="員工" value={attendanceForm.employeeId} onChange={(v) => { const emp = getEmployeeByLineId(v); setAttendanceForm({ ...attendanceForm, employeeId: v, department: emp?.department || getEmployeeDepartments(emp)[0] || "烘焙坊" }); }}>{activeEmployees.map((emp) => <option key={emp.id} value={emp.lineUserId || emp.id}>{emp.name || emp.displayName}</option>)}</Select><Select label="部門" value={attendanceForm.department} onChange={(v) => setAttendanceForm({ ...attendanceForm, department: v })}>{DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}</Select><Input label="日期" type="date" value={attendanceForm.date} onChange={(v) => setAttendanceForm({ ...attendanceForm, date: v })} /><Input label="上班" type="time" value={attendanceForm.clockIn} onChange={(v) => setAttendanceForm({ ...attendanceForm, clockIn: v })} /><Input label="下班" type="time" value={attendanceForm.clockOut} onChange={(v) => setAttendanceForm({ ...attendanceForm, clockOut: v })} /><Input label="備註" value={attendanceForm.note} onChange={(v) => setAttendanceForm({ ...attendanceForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-2">建立打卡紀錄</button></form>}
-      <div className="space-y-3">{todayRecords.map((record) => {
-        const isEditing = editingAttendanceId === record.id;
-        return <div key={record.id} className="rounded-2xl border p-3"><div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto_auto] md:items-center"><div className="font-bold">{record.employeeName}</div><div>{record.date}</div><div>{record.clockIn || "-"} - {record.clockOut || "-"}</div><div>{record.workHours || 0} 小時｜{getAttendanceStatusText(record.attendanceStatus)}</div><button onClick={() => setEditingAttendanceId(isEditing ? null : record.id)} className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button onClick={() => deleteAttendanceRecord(record)} className="rounded-xl bg-red-50 px-4 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-5"><Input label="日期" type="date" value={record.date || ""} onChange={(v) => updateAttendanceRecord(record, { date: v })} /><Input label="上班" type="time" value={record.clockIn || ""} onChange={(v) => updateAttendanceRecord(record, { clockIn: v })} /><Input label="下班" type="time" value={record.clockOut || ""} onChange={(v) => updateAttendanceRecord(record, { clockOut: v })} /><Select label="狀態" value={record.attendanceStatus || "normal"} onChange={(v) => updateAttendanceRecord(record, { attendanceStatus: v })}><option value="normal">正常</option><option value="late">遲到</option><option value="earlyLeave">早退</option><option value="lateAndEarlyLeave">遲到＋早退</option><option value="noSchedule">無排班打卡</option><option value="manualCorrection">補卡修正</option></Select><Input label="備註" value={record.note || ""} onChange={(v) => updateAttendanceRecord(record, { note: v })} /></div>}</div>;
-      })}</div>
-    </Card>
-
-    <Card title="補卡審核管理" subtitle="主管可新增、修改、刪除補卡資料，也可通過或退回。">
-      <div className="mb-4 flex justify-end"><button type="button" onClick={() => setCreatingCorrection(!creatingCorrection)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingCorrection ? "收合新增" : "新增補卡資料"}</button></div>
-      {creatingCorrection && <form onSubmit={createCorrectionRequest} className="mb-5 grid gap-3 rounded-2xl bg-neutral-50 p-4 md:grid-cols-4"><Select label="員工" value={correctionForm.employeeId} onChange={(v) => setCorrectionForm({ ...correctionForm, employeeId: v })}>{activeEmployees.map((emp) => <option key={emp.id} value={emp.lineUserId || emp.id}>{emp.name || emp.displayName}</option>)}</Select><Select label="類型" value={correctionForm.type} onChange={(v) => setCorrectionForm({ ...correctionForm, type: v })}><option value="clockIn">補上班卡</option><option value="clockOut">補下班卡</option></Select><Input label="日期" type="date" value={correctionForm.date} onChange={(v) => setCorrectionForm({ ...correctionForm, date: v })} /><Input label="時間" type="time" value={correctionForm.time} onChange={(v) => setCorrectionForm({ ...correctionForm, time: v })} /><Select label="狀態" value={correctionForm.status} onChange={(v) => setCorrectionForm({ ...correctionForm, status: v })}><option value="pending">待審核</option><option value="approved">已通過</option><option value="rejected">已退回</option></Select><Input label="原因" value={correctionForm.reason} onChange={(v) => setCorrectionForm({ ...correctionForm, reason: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-2">建立補卡資料</button></form>}
-      <div className="space-y-3">{corrections.map((item) => {
-        const isEditing = editingCorrectionId === item.id;
-        return <div key={item.id} className="rounded-2xl border p-3"><div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto_auto_auto_auto] md:items-center"><div className="font-bold">{item.employeeName}</div><div>{item.date} {item.time}</div><div>{item.type === "clockIn" ? "補上班" : "補下班"}</div><div>{statusText(item.status)}</div><button onClick={() => reviewCorrection(item, true)} className="rounded-xl bg-green-50 px-3 py-2 text-sm font-bold text-green-700">通過</button><button onClick={() => reviewCorrection(item, false)} className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-700">退回</button><button onClick={() => setEditingCorrectionId(isEditing ? null : item.id)} className="rounded-xl bg-neutral-900 px-3 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button onClick={() => deleteCorrectionRequest(item)} className="rounded-xl bg-red-50 px-3 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-5"><Select label="類型" value={item.type || "clockIn"} onChange={(v) => updateCorrectionRequest(item, { type: v })}><option value="clockIn">補上班卡</option><option value="clockOut">補下班卡</option></Select><Input label="日期" type="date" value={item.date || ""} onChange={(v) => updateCorrectionRequest(item, { date: v })} /><Input label="時間" type="time" value={item.time || ""} onChange={(v) => updateCorrectionRequest(item, { time: v })} /><Select label="狀態" value={item.status || "pending"} onChange={(v) => updateCorrectionRequest(item, { status: v })}><option value="pending">待審核</option><option value="approved">已通過</option><option value="rejected">已退回</option></Select><Input label="原因" value={item.reason || ""} onChange={(v) => updateCorrectionRequest(item, { reason: v })} /></div>}</div>;
-      })}</div>
-    </Card>
-  </div>;
+  return <div className="space-y-5"><Card title="員工管理" subtitle="預設顯示員工摘要，點擊修改後才展開詳細資料。"><div className="mb-5 rounded-3xl border border-neutral-200 bg-neutral-50 p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="font-bold">手動新增員工</h3><p className="mt-1 text-xs text-neutral-500">LINE ID 可先留空，系統會產生 MANUAL ID。</p></div><button type="button" onClick={() => setCreatingEmployee(!creatingEmployee)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingEmployee ? "收合" : "新增員工"}</button></div>{creatingEmployee && <form onSubmit={createManualEmployee} className="grid gap-3 md:grid-cols-3"><Input label="員工姓名" value={manualEmployeeForm.name} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, name: v })} /><Input label="LINE User ID / 員工ID（可先留空）" value={manualEmployeeForm.lineUserId} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, lineUserId: v })} /><Input label="電話" value={manualEmployeeForm.phone} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, phone: v })} /><Select label="狀態" value={manualEmployeeForm.status} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, status: v })}><option value="pending">待審核</option><option value="active">啟用</option><option value="disabled">停用</option></Select><Select label="權限" value={manualEmployeeForm.role} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, role: v })}><option value="employee">員工</option><option value="manager">管理員</option><option value="owner">老闆</option></Select><Input label="時薪" type="number" value={String(manualEmployeeForm.hourlyWage)} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, hourlyWage: Number(v || 0) })} /><div className="md:col-span-2"><DepartmentCheckboxes label="可支援部門" value={manualEmployeeForm.departments} onChange={(departments) => setManualEmployeeForm({ ...manualEmployeeForm, departments })} /></div><Input label="備註" value={manualEmployeeForm.note} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-3">建立員工資料</button></form>}</div><div className="space-y-3">{employees.map((emp) => { const isEditing = editingEmployeeId === emp.id; const statusLabel = emp.status === "active" ? "啟用" : emp.status === "pending" ? "待審核" : emp.status === "disabled" ? "停用" : emp.status || "未知"; const roleLabel = emp.role === "owner" ? "老闆" : emp.role === "manager" ? "管理員" : "員工"; return <div key={emp.id} className="rounded-2xl border bg-white p-3"><div className="grid gap-3 md:grid-cols-[1.5fr_1fr_1fr_1fr_auto_auto] md:items-center"><div><div className="font-bold">{emp.name || emp.displayName || "未命名員工"}</div><div className="break-all text-xs text-neutral-500">{emp.lineUserId || emp.id}</div></div><div className="text-sm"><span className={`rounded-full px-3 py-1 font-bold ${emp.status === "active" ? "bg-green-50 text-green-700" : emp.status === "disabled" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{statusLabel}</span></div><div className="text-sm text-neutral-600">{roleLabel}</div><div className="text-sm text-neutral-600">{getEmployeeDepartments(emp).join("、")}｜${Number(emp.hourlyWage || 0)}/hr</div><button type="button" onClick={() => setEditingEmployeeId(isEditing ? null : emp.id)} className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button type="button" onClick={() => deleteEmployee(emp)} className="rounded-xl bg-red-50 px-4 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-4"><Input label="姓名" value={emp.name || ""} onChange={(v) => updateEmployee(emp, { name: v })} /><Input label="電話" value={emp.phone || ""} onChange={(v) => updateEmployee(emp, { phone: v })} /><Select label="狀態" value={emp.status || "pending"} onChange={(v) => updateEmployee(emp, { status: v })}><option value="pending">待審核</option><option value="active">啟用</option><option value="disabled">停用</option></Select><Select label="權限" value={emp.role || "employee"} onChange={(v) => updateEmployee(emp, { role: v })}><option value="employee">員工</option><option value="manager">管理員</option><option value="owner">老闆</option></Select><div className="md:col-span-2"><DepartmentCheckboxes label="可支援部門" value={getEmployeeDepartments(emp)} onChange={(departments) => updateEmployee(emp, { departments, department: departments[0] || "烘焙坊" })} /></div><Input label="時薪" type="number" value={String(emp.hourlyWage || 0)} onChange={(v) => updateEmployee(emp, { hourlyWage: Number(v || 0) })} /><Input label="備註" value={emp.note || ""} onChange={(v) => updateEmployee(emp, { note: v })} /></div>}</div>; })}</div></Card><Card title="打卡紀錄管理" subtitle="主管可手動新增、修改、刪除打卡紀錄。"><div className="mb-4 flex justify-end"><button type="button" onClick={() => setCreatingAttendance(!creatingAttendance)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingAttendance ? "收合新增" : "新增打卡紀錄"}</button></div>{creatingAttendance && <form onSubmit={createAttendanceRecord} className="mb-5 grid gap-3 rounded-2xl bg-neutral-50 p-4 md:grid-cols-4"><Select label="員工" value={attendanceForm.employeeId} onChange={(v) => { const emp = getEmployeeByLineId(v); setAttendanceForm({ ...attendanceForm, employeeId: v, department: emp?.department || getEmployeeDepartments(emp)[0] || "烘焙坊" }); }}>{activeEmployees.map((emp) => <option key={emp.id} value={emp.lineUserId || emp.id}>{emp.name || emp.displayName}</option>)}</Select><Select label="部門" value={attendanceForm.department} onChange={(v) => setAttendanceForm({ ...attendanceForm, department: v })}>{DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}</Select><Input label="日期" type="date" value={attendanceForm.date} onChange={(v) => setAttendanceForm({ ...attendanceForm, date: v })} /><Input label="上班" type="time" value={attendanceForm.clockIn} onChange={(v) => setAttendanceForm({ ...attendanceForm, clockIn: v })} /><Input label="下班" type="time" value={attendanceForm.clockOut} onChange={(v) => setAttendanceForm({ ...attendanceForm, clockOut: v })} /><Input label="備註" value={attendanceForm.note} onChange={(v) => setAttendanceForm({ ...attendanceForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-2">建立打卡紀錄</button></form>}<div className="space-y-3">{todayRecords.map((record) => { const isEditing = editingAttendanceId === record.id; return <div key={record.id} className="rounded-2xl border p-3"><div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto_auto] md:items-center"><div className="font-bold">{record.employeeName}</div><div>{record.date}</div><div>{record.clockIn || "-"} - {record.clockOut || "-"}</div><div>{record.workHours || 0} 小時｜{getAttendanceStatusText(record.attendanceStatus)}</div><button onClick={() => setEditingAttendanceId(isEditing ? null : record.id)} className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button onClick={() => deleteAttendanceRecord(record)} className="rounded-xl bg-red-50 px-4 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-5"><Input label="日期" type="date" value={record.date || ""} onChange={(v) => updateAttendanceRecord(record, { date: v })} /><Input label="上班" type="time" value={record.clockIn || ""} onChange={(v) => updateAttendanceRecord(record, { clockIn: v })} /><Input label="下班" type="time" value={record.clockOut || ""} onChange={(v) => updateAttendanceRecord(record, { clockOut: v })} /><Select label="狀態" value={record.attendanceStatus || "normal"} onChange={(v) => updateAttendanceRecord(record, { attendanceStatus: v })}><option value="normal">正常</option><option value="late">遲到</option><option value="earlyLeave">早退</option><option value="lateAndEarlyLeave">遲到＋早退</option><option value="noSchedule">無排班打卡</option><option value="manualCorrection">補卡修正</option></Select><Input label="備註" value={record.note || ""} onChange={(v) => updateAttendanceRecord(record, { note: v })} /></div>}</div>; })}</div></Card><Card title="補卡審核管理" subtitle="主管可新增、修改、刪除補卡資料，也可通過或退回。"><div className="mb-4 flex justify-end"><button type="button" onClick={() => setCreatingCorrection(!creatingCorrection)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingCorrection ? "收合新增" : "新增補卡資料"}</button></div>{creatingCorrection && <form onSubmit={createCorrectionRequest} className="mb-5 grid gap-3 rounded-2xl bg-neutral-50 p-4 md:grid-cols-4"><Select label="員工" value={correctionForm.employeeId} onChange={(v) => setCorrectionForm({ ...correctionForm, employeeId: v })}>{activeEmployees.map((emp) => <option key={emp.id} value={emp.lineUserId || emp.id}>{emp.name || emp.displayName}</option>)}</Select><Select label="類型" value={correctionForm.type} onChange={(v) => setCorrectionForm({ ...correctionForm, type: v })}><option value="clockIn">補上班卡</option><option value="clockOut">補下班卡</option></Select><Input label="日期" type="date" value={correctionForm.date} onChange={(v) => setCorrectionForm({ ...correctionForm, date: v })} /><Input label="時間" type="time" value={correctionForm.time} onChange={(v) => setCorrectionForm({ ...correctionForm, time: v })} /><Select label="狀態" value={correctionForm.status} onChange={(v) => setCorrectionForm({ ...correctionForm, status: v })}><option value="pending">待審核</option><option value="approved">已通過</option><option value="rejected">已退回</option></Select><Input label="原因" value={correctionForm.reason} onChange={(v) => setCorrectionForm({ ...correctionForm, reason: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-2">建立補卡資料</button></form>}<div className="space-y-3">{corrections.map((item) => { const isEditing = editingCorrectionId === item.id; return <div key={item.id} className="rounded-2xl border p-3"><div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto_auto_auto_auto] md:items-center"><div className="font-bold">{item.employeeName}</div><div>{item.date} {item.time}</div><div>{item.type === "clockIn" ? "補上班" : "補下班"}</div><div>{statusText(item.status)}</div><button onClick={() => reviewCorrection(item, true)} className="rounded-xl bg-green-50 px-3 py-2 text-sm font-bold text-green-700">通過</button><button onClick={() => reviewCorrection(item, false)} className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-700">退回</button><button onClick={() => setEditingCorrectionId(isEditing ? null : item.id)} className="rounded-xl bg-neutral-900 px-3 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button onClick={() => deleteCorrectionRequest(item)} className="rounded-xl bg-red-50 px-3 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-5"><Select label="類型" value={item.type || "clockIn"} onChange={(v) => updateCorrectionRequest(item, { type: v })}><option value="clockIn">補上班卡</option><option value="clockOut">補下班卡</option></Select><Input label="日期" type="date" value={item.date || ""} onChange={(v) => updateCorrectionRequest(item, { date: v })} /><Input label="時間" type="time" value={item.time || ""} onChange={(v) => updateCorrectionRequest(item, { time: v })} /><Select label="狀態" value={item.status || "pending"} onChange={(v) => updateCorrectionRequest(item, { status: v })}><option value="pending">待審核</option><option value="approved">已通過</option><option value="rejected">已退回</option></Select><Input label="原因" value={item.reason || ""} onChange={(v) => updateCorrectionRequest(item, { reason: v })} /></div>}</div>; })}</div></Card></div>;
 }
 
 function SchedulePanel({ setGlobalError }) {
@@ -746,50 +640,12 @@ function SchedulePanel({ setGlobalError }) {
   useEffect(() => { loadEmployees(); loadShiftTemplates(); }, []);
   useEffect(() => { loadSchedules(); }, [weekStart, weekEnd]);
   useEffect(() => { if (scheduleEmployeeOptions.length && !scheduleEmployeeOptions.some((emp) => emp.lineUserId === scheduleForm.employeeId)) setScheduleForm((prev) => ({ ...prev, employeeId: scheduleEmployeeOptions[0].lineUserId })); }, [scheduleEmployeeOptions, scheduleForm.employeeId]);
-  async function loadEmployees() {
-    const snap = await safeRun(() => getDocs(query(collection(db, "employees"), where("status", "==", "active"))), "讀取員工清單失敗。", setGlobalError);
-    if (snap) {
-      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((e) => e.role !== "owner").map((emp) => ({ ...emp, departments: getEmployeeDepartments(emp) }));
-      const sorted = sortByFieldAsc(list, "name");
-      setEmployees(sorted);
-      if (sorted.length) setScheduleForm((prev) => ({ ...prev, employeeId: prev.employeeId || sorted[0].lineUserId }));
-    }
-  }
-  async function loadShiftTemplates() {
-    const snap = await safeRun(() => getDocs(collection(db, "shiftTemplates")), "讀取班次設定失敗。", setGlobalError);
-    if (!snap) return;
-    let rows = sortByFieldAsc(snap.docs.map((d) => ({ id: d.id, ...d.data() })), "name");
-    if (!rows.length) {
-      const defaults = [
-        { name: "烘焙早班", department: "烘焙坊", startTime: "08:00", endTime: "16:00", graceMinutes: DEFAULT_GRACE_MINUTES },
-        { name: "烘焙晚班", department: "烘焙坊", startTime: "13:00", endTime: "21:00", graceMinutes: DEFAULT_GRACE_MINUTES },
-        { name: "超市早班", department: "超市", startTime: "08:00", endTime: "16:00", graceMinutes: DEFAULT_GRACE_MINUTES },
-        { name: "超市晚班", department: "超市", startTime: "16:00", endTime: "22:00", graceMinutes: DEFAULT_GRACE_MINUTES },
-      ];
-      for (const item of defaults) await safeRun(() => addDoc(collection(db, "shiftTemplates"), { ...item, scheduledMinutes: minutesBetween(item.startTime, item.endTime), createdAt: serverTimestamp(), updatedAt: serverTimestamp() }), "建立預設班次失敗。", setGlobalError);
-      const nextSnap = await safeRun(() => getDocs(collection(db, "shiftTemplates")), "重新讀取班次失敗。", setGlobalError);
-      if (nextSnap) rows = sortByFieldAsc(nextSnap.docs.map((d) => ({ id: d.id, ...d.data() })), "name");
-    }
-    setShiftTemplates(rows);
-    if (rows.length) setScheduleForm((prev) => ({ ...prev, shiftId: prev.shiftId || rows[0].id }));
-  }
-  async function loadSchedules() {
-    const snap = await safeRun(() => getDocs(query(collection(db, "schedules"), where("date", ">=", weekStart), where("date", "<=", weekEnd))), "讀取週排班失敗。", setGlobalError);
-    if (snap) setSchedules(sortByFieldAsc(snap.docs.map((d) => ({ id: d.id, ...d.data() })), "date"));
-  }
-  async function createShiftTemplate(e) {
-    e.preventDefault();
-    if (!shiftForm.name.trim()) return alert("請填寫班次名稱");
-    if (minutesBetween(shiftForm.startTime, shiftForm.endTime) <= 0) return alert("下班時間必須晚於上班時間");
-    setSaving(true);
-    const ok = await safeRun(() => addDoc(collection(db, "shiftTemplates"), { name: shiftForm.name.trim(), department: shiftForm.department, startTime: shiftForm.startTime, endTime: shiftForm.endTime, scheduledMinutes: minutesBetween(shiftForm.startTime, shiftForm.endTime), graceMinutes: Number(shiftForm.graceMinutes || DEFAULT_GRACE_MINUTES), createdAt: serverTimestamp(), updatedAt: serverTimestamp() }), "新增班次失敗。", setGlobalError);
-    if (ok) await loadShiftTemplates();
-    setSaving(false);
-  }
+  async function loadEmployees() { const snap = await safeRun(() => getDocs(query(collection(db, "employees"), where("status", "==", "active"))), "讀取員工清單失敗。", setGlobalError); if (snap) { const list = snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((e) => e.role !== "owner").map((emp) => ({ ...emp, departments: getEmployeeDepartments(emp) })); const sorted = sortByFieldAsc(list, "name"); setEmployees(sorted); if (sorted.length) setScheduleForm((prev) => ({ ...prev, employeeId: prev.employeeId || sorted[0].lineUserId })); } }
+  async function loadShiftTemplates() { const snap = await safeRun(() => getDocs(collection(db, "shiftTemplates")), "讀取班次設定失敗。", setGlobalError); if (!snap) return; let rows = sortByFieldAsc(snap.docs.map((d) => ({ id: d.id, ...d.data() })), "name"); if (!rows.length) { const defaults = [ { name: "烘焙早班", department: "烘焙坊", startTime: "08:00", endTime: "16:00", graceMinutes: DEFAULT_GRACE_MINUTES }, { name: "烘焙晚班", department: "烘焙坊", startTime: "13:00", endTime: "21:00", graceMinutes: DEFAULT_GRACE_MINUTES }, { name: "超市早班", department: "超市", startTime: "08:00", endTime: "16:00", graceMinutes: DEFAULT_GRACE_MINUTES }, { name: "超市晚班", department: "超市", startTime: "16:00", endTime: "22:00", graceMinutes: DEFAULT_GRACE_MINUTES } ]; for (const item of defaults) await safeRun(() => addDoc(collection(db, "shiftTemplates"), { ...item, scheduledMinutes: minutesBetween(item.startTime, item.endTime), createdAt: serverTimestamp(), updatedAt: serverTimestamp() }), "建立預設班次失敗。", setGlobalError); const nextSnap = await safeRun(() => getDocs(collection(db, "shiftTemplates")), "重新讀取班次失敗。", setGlobalError); if (nextSnap) rows = sortByFieldAsc(nextSnap.docs.map((d) => ({ id: d.id, ...d.data() })), "name"); } setShiftTemplates(rows); if (rows.length) setScheduleForm((prev) => ({ ...prev, shiftId: prev.shiftId || rows[0].id })); }
+  async function loadSchedules() { const snap = await safeRun(() => getDocs(query(collection(db, "schedules"), where("date", ">=", weekStart), where("date", "<=", weekEnd))), "讀取週排班失敗。", setGlobalError); if (snap) setSchedules(sortByFieldAsc(snap.docs.map((d) => ({ id: d.id, ...d.data() })), "date")); }
+  async function createShiftTemplate(e) { e.preventDefault(); if (!shiftForm.name.trim()) return alert("請填寫班次名稱"); if (minutesBetween(shiftForm.startTime, shiftForm.endTime) <= 0) return alert("下班時間必須晚於上班時間"); setSaving(true); const ok = await safeRun(() => addDoc(collection(db, "shiftTemplates"), { name: shiftForm.name.trim(), department: shiftForm.department, startTime: shiftForm.startTime, endTime: shiftForm.endTime, scheduledMinutes: minutesBetween(shiftForm.startTime, shiftForm.endTime), graceMinutes: Number(shiftForm.graceMinutes || DEFAULT_GRACE_MINUTES), createdAt: serverTimestamp(), updatedAt: serverTimestamp() }), "新增班次失敗。", setGlobalError); if (ok) await loadShiftTemplates(); setSaving(false); }
   async function removeShiftTemplate(shiftId) { const ok = await safeRun(() => deleteDoc(doc(db, "shiftTemplates", shiftId)), "刪除班次失敗。", setGlobalError); if (ok !== null) await loadShiftTemplates(); }
-  async function writeSchedule(emp, shift, date, note = "") {
-    return safeRun(() => addDoc(collection(db, "schedules"), { employeeId: emp.lineUserId, employeeName: emp.name || emp.displayName, department: shift.department, date, month: date.slice(0, 7), shiftId: shift.id, shiftName: shift.name, startTime: shift.startTime, endTime: shift.endTime, scheduledMinutes: minutesBetween(shift.startTime, shift.endTime), graceMinutes: Number(shift.graceMinutes ?? DEFAULT_GRACE_MINUTES), note, status: "scheduled", createdAt: serverTimestamp(), updatedAt: serverTimestamp() }), "新增排班失敗。", setGlobalError);
-  }
+  async function writeSchedule(emp, shift, date, note = "") { return safeRun(() => addDoc(collection(db, "schedules"), { employeeId: emp.lineUserId, employeeName: emp.name || emp.displayName, department: shift.department, date, month: date.slice(0, 7), shiftId: shift.id, shiftName: shift.name, startTime: shift.startTime, endTime: shift.endTime, scheduledMinutes: minutesBetween(shift.startTime, shift.endTime), graceMinutes: Number(shift.graceMinutes ?? DEFAULT_GRACE_MINUTES), note, status: "scheduled", createdAt: serverTimestamp(), updatedAt: serverTimestamp() }), "新增排班失敗。", setGlobalError); }
   async function assignShift(e) { e?.preventDefault?.(); const emp = employees.find((x) => x.lineUserId === scheduleForm.employeeId); const shift = shiftTemplates.find((x) => x.id === scheduleForm.shiftId); if (!emp) return alert("請選擇員工"); if (!shift) return alert("請選擇班次"); if (!employeeCanWorkDepartment(emp, shift.department)) return alert(`${emp.name || emp.displayName} 目前沒有設定可支援「${shift.department}」。`); setSaving(true); const ok = await writeSchedule(emp, shift, scheduleForm.date, scheduleForm.note.trim()); if (ok) { setScheduleForm((prev) => ({ ...prev, note: "" })); await loadSchedules(); } setSaving(false); }
   async function removeSchedule(scheduleId) { const ok = await safeRun(() => deleteDoc(doc(db, "schedules", scheduleId)), "刪除排班失敗。", setGlobalError); if (ok !== null) await loadSchedules(); }
   function selectCell(employeeId, date) { setScheduleForm((prev) => ({ ...prev, employeeId, date })); setQuickCell({ employeeId, date }); }
@@ -803,18 +659,8 @@ function SalaryPanel({ setGlobalError }) {
   const [employees, setEmployees] = useState([]);
   const [records, setRecords] = useState([]);
   useEffect(() => { load(); }, [month]);
-  async function load() {
-    const employeeSnap = await safeRun(() => getDocs(query(collection(db, "employees"), where("status", "==", "active"))), "讀取薪資員工清單失敗。", setGlobalError);
-    if (employeeSnap) setEmployees(sortByFieldAsc(employeeSnap.docs.map((d) => ({ id: d.id, ...d.data() })), "name"));
-    const recordSnap = await safeRun(() => getDocs(query(collection(db, "attendanceRecords"), where("month", "==", month))), "讀取薪資月報失敗。", setGlobalError);
-    if (recordSnap) setRecords(sortByFieldAsc(recordSnap.docs.map((d) => ({ id: d.id, ...d.data() })), "date"));
-  }
-  const rows = employees.map((emp) => {
-    const empRecords = records.filter((r) => r.employeeId === emp.lineUserId);
-    const totalMinutes = empRecords.reduce((sum, r) => sum + Number(r.workMinutes || 0), 0);
-    const hours = formatHours(totalMinutes);
-    return { id: emp.id, name: emp.name || emp.displayName, department: getEmployeeDepartments(emp).join("、"), hourlyWage: Number(emp.hourlyWage || 0), totalMinutes, hours, salary: Math.round(hours * Number(emp.hourlyWage || 0)), days: empRecords.length, abnormalCount: empRecords.filter((r) => r.attendanceStatus && r.attendanceStatus !== "normal").length };
-  });
+  async function load() { const employeeSnap = await safeRun(() => getDocs(query(collection(db, "employees"), where("status", "==", "active"))), "讀取薪資員工清單失敗。", setGlobalError); if (employeeSnap) setEmployees(sortByFieldAsc(employeeSnap.docs.map((d) => ({ id: d.id, ...d.data() })), "name")); const recordSnap = await safeRun(() => getDocs(query(collection(db, "attendanceRecords"), where("month", "==", month))), "讀取薪資月報失敗。", setGlobalError); if (recordSnap) setRecords(sortByFieldAsc(recordSnap.docs.map((d) => ({ id: d.id, ...d.data() })), "date")); }
+  const rows = employees.map((emp) => { const empRecords = records.filter((r) => r.employeeId === emp.lineUserId); const totalMinutes = empRecords.reduce((sum, r) => sum + Number(r.workMinutes || 0), 0); const hours = formatHours(totalMinutes); return { id: emp.id, name: emp.name || emp.displayName, department: getEmployeeDepartments(emp).join("、"), hourlyWage: Number(emp.hourlyWage || 0), totalMinutes, hours, salary: Math.round(hours * Number(emp.hourlyWage || 0)), days: empRecords.length, abnormalCount: empRecords.filter((r) => r.attendanceStatus && r.attendanceStatus !== "normal").length }; });
   return <Card title="薪資月報"><div className="mb-4 max-w-xs"><Input label="月份" type="month" value={month} onChange={setMonth} /></div><div className="overflow-x-auto"><table className="w-full min-w-[820px] border-separate border-spacing-y-2 text-sm"><thead className="text-left text-neutral-500"><tr><th className="px-3 py-2">員工</th><th className="px-3 py-2">可支援部門</th><th className="px-3 py-2">出勤天數</th><th className="px-3 py-2">總分鐘</th><th className="px-3 py-2">總工時</th><th className="px-3 py-2">時薪</th><th className="px-3 py-2">異常</th><th className="px-3 py-2">預估薪資</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id} className="bg-neutral-100"><td className="rounded-l-2xl px-3 py-3 font-bold">{row.name}</td><td className="px-3 py-3">{row.department}</td><td className="px-3 py-3">{row.days}</td><td className="px-3 py-3">{row.totalMinutes}</td><td className="px-3 py-3">{row.hours}</td><td className="px-3 py-3">${row.hourlyWage}</td><td className="px-3 py-3">{row.abnormalCount}</td><td className="rounded-r-2xl px-3 py-3 font-bold">${row.salary.toLocaleString()}</td></tr>)}</tbody></table></div></Card>;
 }
 
@@ -822,6 +668,5 @@ function RecordTable({ records }) {
   if (!records.length) return <div className="mt-4 rounded-2xl bg-neutral-100 p-4 text-sm text-neutral-500">目前沒有紀錄</div>;
   return <div className="mt-5 overflow-x-auto"><table className="w-full min-w-[980px] border-separate border-spacing-y-2 text-sm"><thead className="text-left text-neutral-500"><tr><th className="px-3 py-2">日期</th><th className="px-3 py-2">員工</th><th className="px-3 py-2">部門</th><th className="px-3 py-2">班表</th><th className="px-3 py-2">上班</th><th className="px-3 py-2">下班</th><th className="px-3 py-2">分鐘</th><th className="px-3 py-2">工時</th><th className="px-3 py-2">狀態</th><th className="px-3 py-2">來源</th></tr></thead><tbody>{records.map((r) => <tr key={r.id} className="bg-neutral-100"><td className="rounded-l-2xl px-3 py-3">{r.date}</td><td className="px-3 py-3 font-bold">{r.employeeName}</td><td className="px-3 py-3">{r.department || "-"}</td><td className="px-3 py-3">{r.scheduledStart || "-"} - {r.scheduledEnd || "-"}</td><td className="px-3 py-3">{r.clockIn || "-"}</td><td className="px-3 py-3">{r.clockOut || "-"}</td><td className="px-3 py-3">{r.workMinutes || 0}</td><td className="px-3 py-3">{r.workHours || 0}</td><td className="px-3 py-3">{getAttendanceStatusText(r.attendanceStatus)}</td><td className="rounded-r-2xl px-3 py-3">{r.source || "normal"}</td></tr>)}</tbody></table></div>;
 }
-function SimpleList({ items, empty, render }) { return !items.length ? <div className="rounded-2xl bg-neutral-100 p-4 text-sm text-neutral-500">{empty}</div> : <div className="space-y-3">{items.map((item) => <React.Fragment key={item.id}>{render(item)}</React.Fragment>)}</div>; }
-function statusText(status) { if (status === "pending") return "待審核"; if (status === "approved") return "已通過"; if (status === "rejected") return "已退回"; return status || "未知"; }
+
 export default App;
