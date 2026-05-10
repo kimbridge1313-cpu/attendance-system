@@ -20,21 +20,23 @@ import liff from "@line/liff";
 /**
  * Attendance LIFF + Firebase Firestore Frontend
  * --------------------------------------------------
- * 修正版：
- * 1. 修正 TypeError: Failed to fetch 時錯誤訊息過於模糊的問題。
- * 2. LIFF 初始化失敗時顯示明確診斷清單，不再白畫面。
- * 3. Firestore 讀寫失敗時只顯示錯誤提示，不讓整個 App crash。
- * 4. 保留：員工管理 CRUD、打卡紀錄 CRUD、補卡 CRUD、排班、薪資月報。
+ * 目前功能：
+ * 1. LIFF / DEV_MODE 雙模式。
+ * 2. 正式模式：用 LINE profile.userId 判定身份。
+ *    - userId 在 OWNER_LINE_USER_IDS：自動建立 / 進入老闆帳號。
+ *    - Firestore employees/{userId} 已存在：依 status / role 進入員工或主管。
+ *    - Firestore 沒有資料：顯示「申請加入員工系統」。
+ * 3. 員工申請、主管後台、員工 CRUD、打卡紀錄 CRUD、補卡 CRUD。
+ * 4. 排班、部門、時薪 / 正職薪資、薪資單加扣項、部門薪資統計。
+ * 5. 公司定位設定與打卡定位驗證。
  */
 
 // ===== 🔥 上線設定區（只需要改這裡） =====
-// 先用 true 測前端與 Firebase；確認畫面正常後，再改 false 接 LIFF
-const DEV_MODE = true;
+// 開發測試保持 true；正式接 LINE LIFF 時改 false。
+const DEV_MODE = false;
+const DEV_LOGIN_AS = "owner"; // DEV_MODE=true 時才會使用：owner / newEmployee / employee
 const LIFF_ID = "2009896295-aplNwbiH";
 const OWNER_LINE_USER_IDS = ["U0d01ce43203dbcf0d3a94436b60eb232"];
-
-// 👉 你的 Vercel 正式網址，必須跟 LINE LIFF Endpoint URL 完全一致
-// 例：const APP_BASE_URL = "https://attendance-system.vercel.app";
 const APP_BASE_URL = typeof window !== "undefined" ? window.location.origin : "";
 // ======================================
 
@@ -49,7 +51,14 @@ const firebaseConfig = {
 
 const DEPARTMENTS = ["烘焙坊", "超市"];
 const DEFAULT_GRACE_MINUTES = 10;
-const DEV_LOGIN_AS = "newEmployee";
+const DEFAULT_FULL_TIME_MONTHLY_HOURS = 160;
+const DEV_ALLOW_LOCATION_FALLBACK = true;
+
+const DEFAULT_COMPANY_LOCATIONS = [
+  { name: "烘焙坊", latitude: 23.7096, longitude: 120.5433, radiusMeters: 150 },
+  { name: "超市", latitude: 23.7096, longitude: 120.5433, radiusMeters: 150 },
+];
+
 const DEV_PROFILES = {
   owner: { userId: OWNER_LINE_USER_IDS[0] || "DEV_OWNER_USER_ID", displayName: "開發測試老闆", pictureUrl: "" },
   newEmployee: { userId: "DEV_NEW_EMPLOYEE_USER_ID", displayName: "新員工測試帳號", pictureUrl: "" },
@@ -64,33 +73,40 @@ const todayString = () => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 };
+
 const currentTimeString = () => {
   const now = new Date();
   return `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 };
+
 const getMonthString = () => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 };
+
 const toMinutes = (hhmm) => {
   if (!hhmm) return null;
-  const [h, m] = hhmm.split(":").map(Number);
+  const [h, m] = String(hhmm).split(":").map(Number);
   if (Number.isNaN(h) || Number.isNaN(m)) return null;
   return h * 60 + m;
 };
+
 const minutesBetween = (startHHMM, endHHMM) => {
   const start = toMinutes(startHHMM);
   const end = toMinutes(endHHMM);
   if (start === null || end === null) return 0;
   return Math.max(0, end - start);
 };
-const formatHours = (minutes) => Math.round((minutes / 60) * 100) / 100;
+
+const formatHours = (minutes) => Math.round((Number(minutes || 0) / 60) * 100) / 100;
+
 const timestampMillis = (value) => {
   if (!value) return 0;
   if (typeof value.toMillis === "function") return value.toMillis();
   if (value.seconds) return value.seconds * 1000;
   return 0;
 };
+
 const sortByFieldAsc = (items, field) => [...items].sort((a, b) => String(a[field] || "").localeCompare(String(b[field] || "")));
 const sortByCreatedAtDesc = (items) => [...items].sort((a, b) => timestampMillis(b.createdAt) - timestampMillis(a.createdAt));
 
@@ -99,6 +115,7 @@ const getEmployeeDepartments = (employee) => {
   if (employee?.department) return [employee.department];
   return ["烘焙坊"];
 };
+
 const employeeCanWorkDepartment = (employee, department) => getEmployeeDepartments(employee).includes(department);
 const filterEmployeesByDepartment = (employees, department) => department === "全部" ? employees : employees.filter((emp) => employeeCanWorkDepartment(emp, department));
 
@@ -106,6 +123,7 @@ const isNetworkFetchError = (err) => {
   const text = String(err?.message || err || "").toLowerCase();
   return text.includes("failed to fetch") || text.includes("networkerror") || text.includes("load failed") || text.includes("network request failed");
 };
+
 const isOfflineError = (err) => {
   const text = String(err?.message || err || "").toLowerCase();
   return text.includes("client is offline") || text.includes("offline") || text.includes("unavailable") || text.includes("failed to get document") || isNetworkFetchError(err);
@@ -166,6 +184,7 @@ async function safeRun(fn, fallback, onError) {
 function buildManualEmployeeData(form, now = Date.now()) {
   const departments = Array.isArray(form.departments) && form.departments.length ? form.departments : ["烘焙坊"];
   const lineUserId = form.lineUserId?.trim() || `MANUAL_${now}`;
+  const employeeType = form.employeeType || "hourly";
   return {
     id: lineUserId,
     lineUserId,
@@ -174,12 +193,29 @@ function buildManualEmployeeData(form, now = Date.now()) {
     pictureUrl: "",
     role: form.role || "employee",
     status: form.status || "active",
+    employeeType,
     department: departments[0],
     departments,
     hourlyWage: Number(form.hourlyWage || 0),
+    baseSalary: Number(form.baseSalary || 0),
+    overtimeHourlyWage: Number(form.overtimeHourlyWage || form.hourlyWage || 0),
     phone: form.phone?.trim() || "",
     note: form.note?.trim() || "主管手動新增",
   };
+}
+
+function calculateSalary({ employeeType, totalMinutes, hourlyWage, baseSalary, overtimeHourlyWage, adjustments = [], standardMonthlyHours = DEFAULT_FULL_TIME_MONTHLY_HOURS }) {
+  const hours = formatHours(totalMinutes);
+  const additions = adjustments.filter((item) => item.type === "addition").reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const deductions = adjustments.filter((item) => item.type === "deduction").reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  if (employeeType === "fullTime") {
+    const overtimeHours = Math.max(0, Math.round((hours - standardMonthlyHours) * 100) / 100);
+    const basePay = Number(baseSalary || 0);
+    const overtimePay = Math.round(overtimeHours * Number(overtimeHourlyWage || 0));
+    return { hours, overtimeHours, basePay, overtimePay, additions, deductions, salaryBeforeAdjustments: basePay + overtimePay, salary: Math.round(basePay + overtimePay + additions - deductions) };
+  }
+  const basePay = Math.round(hours * Number(hourlyWage || 0));
+  return { hours, overtimeHours: 0, basePay, overtimePay: 0, additions, deductions, salaryBeforeAdjustments: basePay, salary: Math.round(basePay + additions - deductions) };
 }
 
 const getAttendanceStatusText = (status) => {
@@ -191,6 +227,7 @@ const getAttendanceStatusText = (status) => {
   if (status === "manualCorrection") return "補卡修正";
   return "尚未判斷";
 };
+
 function statusText(status) {
   if (status === "pending") return "待審核";
   if (status === "approved") return "已通過";
@@ -212,6 +249,74 @@ function getMonthWeekDates(month, weekIndex) {
     const mm = String(d.getMonth() + 1).padStart(2, "0");
     const dd = String(d.getDate()).padStart(2, "0");
     return { date: `${yyyy}-${mm}-${dd}`, mmdd: `${Number(mm)}/${Number(dd)}`, weekday: labels[i] };
+  });
+}
+
+function getDistanceMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function getGeolocationErrorMessage(error) {
+  const code = error?.code;
+  if (code === 1) return "定位權限被拒絕。請到瀏覽器或 LINE 的網站設定中允許定位權限。";
+  if (code === 2) return "目前無法取得定位。請確認 GPS、Wi-Fi 或行動網路已開啟，並稍後再試。";
+  if (code === 3) return "取得定位逾時。請移到收訊較好的地方後再試一次。";
+  if (!navigator.geolocation) return "此瀏覽器不支援定位。";
+  return error?.message || "定位失敗，請確認定位權限已開啟。";
+}
+
+async function getCurrentPositionSafe() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error("此瀏覽器不支援定位。"));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => resolve(position),
+      (error) => reject(new Error(getGeolocationErrorMessage(error))),
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }
+    );
+  });
+}
+
+function buildDevPosition(locations) {
+  const first = locations?.[0] || DEFAULT_COMPANY_LOCATIONS[0];
+  return {
+    coords: {
+      latitude: Number(first.latitude),
+      longitude: Number(first.longitude),
+      accuracy: 0,
+    },
+    __devFallback: true,
+  };
+}
+
+async function getClockPosition(companyLocations) {
+  try {
+    return await getCurrentPositionSafe();
+  } catch (error) {
+    if (DEV_MODE && DEV_ALLOW_LOCATION_FALLBACK) {
+      console.warn("DEV_MODE location fallback:", error);
+      return buildDevPosition(companyLocations);
+    }
+    throw error;
+  }
+}
+
+function findMatchedCompanyLocation(companyLocations, latitude, longitude) {
+  return (companyLocations || []).find((location) => {
+    const distance = getDistanceMeters(latitude, longitude, Number(location.latitude), Number(location.longitude));
+    return distance <= Number(location.radiusMeters || 150);
   });
 }
 
@@ -247,6 +352,11 @@ function runSelfTests() {
   console.assert(getMonthWeekDates("2026-04", 4).length === 7, "month week selector should return 7 days");
   console.assert(isNetworkFetchError({ message: "TypeError: Failed to fetch" }) === true, "failed fetch should be detected");
   console.assert(isOfflineError({ message: "Failed to get document because the client is offline." }) === true, "offline errors should be detected");
+  console.assert(calculateSalary({ employeeType: "hourly", totalMinutes: 600, hourlyWage: 200 }).salary === 2000, "hourly salary should use total hours times hourly wage");
+  console.assert(calculateSalary({ employeeType: "fullTime", totalMinutes: 9660, baseSalary: 30000, overtimeHourlyWage: 200 }).salary === 30200, "full-time salary should add overtime pay after standard hours");
+  console.assert(calculateSalary({ employeeType: "hourly", totalMinutes: 600, hourlyWage: 200, adjustments: [{ type: "addition", amount: 500 }, { type: "deduction", amount: 100 }] }).salary === 2400, "salary should apply additions and deductions");
+  console.assert(getGeolocationErrorMessage({ code: 1 }).includes("定位權限"), "geolocation permission error should be readable");
+  console.assert(getDistanceMeters(23.7096, 120.5433, 23.7096, 120.5433) === 0, "same location distance should be 0");
 }
 runSelfTests();
 
@@ -261,6 +371,7 @@ function App() {
   const [todayRecord, setTodayRecord] = useState(null);
   const [todaySchedule, setTodaySchedule] = useState(null);
   const [activeTab, setActiveTab] = useState("clock");
+  const [companyLocations, setCompanyLocations] = useState(DEFAULT_COMPANY_LOCATIONS);
 
   const isManager = useMemo(() => profile?.userId && (OWNER_LINE_USER_IDS.includes(profile.userId) || employee?.role === "owner" || employee?.role === "manager"), [profile, employee]);
 
@@ -308,6 +419,7 @@ function App() {
 
     if (!lineProfile) { setLoading(false); return; }
     setProfile(lineProfile);
+    await loadCompanyLocations();
 
     const employeeRef = doc(db, "employees", lineProfile.userId);
     const employeeSnap = await safeRun(() => getDoc(employeeRef), "讀取員工資料失敗。", setError);
@@ -321,9 +433,12 @@ function App() {
         pictureUrl: "",
         role: DEV_LOGIN_AS === "owner" ? "owner" : "employee",
         status: DEV_LOGIN_AS === "newEmployee" ? "pending" : "active",
+        employeeType: "hourly",
         department: DEV_LOGIN_AS === "owner" ? "管理" : "烘焙坊",
         departments: DEV_LOGIN_AS === "owner" ? ["烘焙坊", "超市"] : ["烘焙坊"],
         hourlyWage: DEV_LOGIN_AS === "owner" ? 0 : 190,
+        baseSalary: 0,
+        overtimeHourlyWage: DEV_LOGIN_AS === "owner" ? 0 : 190,
         phone: "",
         note: "Firebase 離線時的 DEV fallback，不會寫入資料庫。",
       });
@@ -347,9 +462,12 @@ function App() {
         pictureUrl: lineProfile.pictureUrl || "",
         role: "owner",
         status: "active",
+        employeeType: "hourly",
         department: "管理",
         departments: ["烘焙坊", "超市"],
         hourlyWage: 0,
+        baseSalary: 0,
+        overtimeHourlyWage: 0,
         phone: "",
         note: "系統建立者",
         createdAt: serverTimestamp(),
@@ -362,6 +480,16 @@ function App() {
     }
 
     setLoading(false);
+  }
+
+  async function loadCompanyLocations() {
+    const settingSnap = await safeRun(() => getDoc(doc(db, "settings", "companyLocations")), "讀取公司定位設定失敗。", setError);
+    if (settingSnap?.exists()) {
+      const data = settingSnap.data();
+      if (Array.isArray(data.locations) && data.locations.length) {
+        setCompanyLocations(data.locations);
+      }
+    }
   }
 
   async function loadTodayRecord(userId) {
@@ -387,9 +515,12 @@ function App() {
       pictureUrl: profile.pictureUrl || "",
       role: "employee",
       status: "pending",
+      employeeType: "hourly",
       department: form.department,
       departments: [form.department],
       hourlyWage: 0,
+      baseSalary: 0,
+      overtimeHourlyWage: 0,
       phone: form.phone.trim(),
       note: form.note.trim(),
       createdAt: serverTimestamp(),
@@ -401,54 +532,94 @@ function App() {
 
   async function clockIn() {
     if (!profile || !employee) return;
-    const date = todayString();
-    const time = currentTimeString();
-    const check = evaluateAttendance({ schedule: todaySchedule, clockIn: time, clockOut: "" });
-    const data = {
-      employeeId: profile.userId,
-      employeeName: employee.name || profile.displayName,
-      department: todaySchedule?.department || employee.department || "未設定",
-      date,
-      month: date.slice(0, 7),
-      scheduleId: todaySchedule?.id || null,
-      scheduledStart: todaySchedule?.startTime || "",
-      scheduledEnd: todaySchedule?.endTime || "",
-      clockIn: time,
-      clockOut: "",
-      clockInAt: serverTimestamp(),
-      clockOutAt: null,
-      workMinutes: 0,
-      workHours: 0,
-      attendanceStatus: check.attendanceStatus,
-      lateMinutes: check.lateMinutes,
-      earlyLeaveMinutes: 0,
-      source: "normal",
-      status: "open",
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    };
-    const ref = await safeRun(() => addDoc(collection(db, "attendanceRecords"), data), "上班打卡失敗。", setError);
-    if (ref) setTodayRecord({ id: ref.id, ...data });
+    try {
+      const position = await getClockPosition(companyLocations);
+      const latitude = position.coords.latitude;
+      const longitude = position.coords.longitude;
+      const matchedLocation = findMatchedCompanyLocation(companyLocations, latitude, longitude);
+
+      if (!matchedLocation) {
+        alert("你目前不在公司允許打卡範圍內。");
+        return;
+      }
+
+      const date = todayString();
+      const time = currentTimeString();
+      const check = evaluateAttendance({ schedule: todaySchedule, clockIn: time, clockOut: "" });
+      const data = {
+        employeeId: profile.userId,
+        employeeName: employee.name || profile.displayName,
+        department: todaySchedule?.department || employee.department || matchedLocation.name || "未設定",
+        date,
+        month: date.slice(0, 7),
+        scheduleId: todaySchedule?.id || null,
+        scheduledStart: todaySchedule?.startTime || "",
+        scheduledEnd: todaySchedule?.endTime || "",
+        clockIn: time,
+        clockOut: "",
+        clockInAt: serverTimestamp(),
+        clockOutAt: null,
+        workMinutes: 0,
+        workHours: 0,
+        attendanceStatus: check.attendanceStatus,
+        lateMinutes: check.lateMinutes,
+        earlyLeaveMinutes: 0,
+        source: position.__devFallback ? "dev-location-fallback" : "normal",
+        locationVerified: true,
+        locationName: matchedLocation.name,
+        latitude,
+        longitude,
+        status: "open",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      const ref = await safeRun(() => addDoc(collection(db, "attendanceRecords"), data), "上班打卡失敗。", setError);
+      if (ref) setTodayRecord({ id: ref.id, ...data });
+    } catch (err) {
+      const message = err?.message || "定位失敗，請開啟手機定位權限後再打卡。";
+      alert(message);
+      console.error(err);
+    }
   }
 
   async function clockOut() {
     if (!todayRecord?.id) return;
-    const time = currentTimeString();
-    const workMinutes = minutesBetween(todayRecord.clockIn, time);
-    const check = evaluateAttendance({ schedule: todaySchedule, clockIn: todayRecord.clockIn, clockOut: time });
-    const updateData = {
-      clockOut: time,
-      clockOutAt: serverTimestamp(),
-      workMinutes,
-      workHours: formatHours(workMinutes),
-      attendanceStatus: check.attendanceStatus,
-      lateMinutes: check.lateMinutes,
-      earlyLeaveMinutes: check.earlyLeaveMinutes,
-      status: "completed",
-      updatedAt: serverTimestamp(),
-    };
-    const ok = await safeRun(() => updateDoc(doc(db, "attendanceRecords", todayRecord.id), updateData), "下班打卡失敗。", setError);
-    if (ok !== null) setTodayRecord({ ...todayRecord, ...updateData });
+    try {
+      const position = await getClockPosition(companyLocations);
+      const latitude = position.coords.latitude;
+      const longitude = position.coords.longitude;
+      const matchedLocation = findMatchedCompanyLocation(companyLocations, latitude, longitude);
+
+      if (!matchedLocation) {
+        alert("你目前不在公司允許打卡範圍內。");
+        return;
+      }
+
+      const time = currentTimeString();
+      const workMinutes = minutesBetween(todayRecord.clockIn, time);
+      const check = evaluateAttendance({ schedule: todaySchedule, clockIn: todayRecord.clockIn, clockOut: time });
+      const updateData = {
+        clockOut: time,
+        clockOutAt: serverTimestamp(),
+        workMinutes,
+        workHours: formatHours(workMinutes),
+        attendanceStatus: check.attendanceStatus,
+        lateMinutes: check.lateMinutes,
+        earlyLeaveMinutes: check.earlyLeaveMinutes,
+        status: "completed",
+        locationVerified: true,
+        clockOutLocationName: matchedLocation.name,
+        clockOutLatitude: latitude,
+        clockOutLongitude: longitude,
+        updatedAt: serverTimestamp(),
+      };
+      const ok = await safeRun(() => updateDoc(doc(db, "attendanceRecords", todayRecord.id), updateData), "下班打卡失敗。", setError);
+      if (ok !== null) setTodayRecord({ ...todayRecord, ...updateData });
+    } catch (err) {
+      const message = err?.message || "定位失敗，請開啟手機定位權限後再打卡。";
+      alert(message);
+      console.error(err);
+    }
   }
 
   if (loading) return <FullPage message="系統載入中..." />;
@@ -474,19 +645,19 @@ function App() {
 
       <main className="mx-auto max-w-6xl px-4 py-5">
         {error && <div className="mb-4 whitespace-pre-line rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>}
-        {DEV_MODE && <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">目前是 DEV_MODE，身份：<b>{DEV_LOGIN_AS}</b>。</div>}
+        {DEV_MODE && <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">目前是 DEV_MODE，身份：<b>{DEV_LOGIN_AS}</b>。定位失敗時會使用公司預設位置作為測試 fallback。</div>}
         <nav className="mb-5 grid grid-cols-2 gap-2 md:grid-cols-6">
           <TabButton active={activeTab === "clock"} onClick={() => setActiveTab("clock")}>打卡</TabButton>
           <TabButton active={activeTab === "correction"} onClick={() => setActiveTab("correction")}>補卡</TabButton>
           <TabButton active={activeTab === "myStats"} onClick={() => setActiveTab("myStats")}>我的統計</TabButton>
           {isManager && <TabButton active={activeTab === "admin"} onClick={() => setActiveTab("admin")}>主管後台</TabButton>}
           {isManager && <TabButton active={activeTab === "schedule"} onClick={() => setActiveTab("schedule")}>排班</TabButton>}
-          {isManager && <TabButton active={activeTab === "salary"} onClick={() => setActiveTab("salary")}>薪資月報</TabButton>}
+          {isManager && <TabButton active={activeTab === "salary"} onClick={() => setActiveTab("salary")}>薪資單</TabButton>}
         </nav>
         {activeTab === "clock" && <ClockPanel employee={employee} todayRecord={todayRecord} todaySchedule={todaySchedule} onClockIn={clockIn} onClockOut={clockOut} onReload={() => Promise.all([loadTodayRecord(profile.userId), loadTodaySchedule(profile.userId)])} />}
         {activeTab === "correction" && <CorrectionPanel employee={employee} profile={profile} setGlobalError={setError} />}
         {activeTab === "myStats" && <MyStatsPanel employee={employee} setGlobalError={setError} />}
-        {activeTab === "admin" && isManager && <AdminPanel currentUser={employee} setGlobalError={setError} />}
+        {activeTab === "admin" && isManager && <AdminPanel currentUser={employee} setGlobalError={setError} companyLocations={companyLocations} setCompanyLocations={setCompanyLocations} />}
         {activeTab === "schedule" && isManager && <SchedulePanel setGlobalError={setError} />}
         {activeTab === "salary" && isManager && <SalaryPanel setGlobalError={setError} />}
       </main>
@@ -572,7 +743,79 @@ function MyStatsPanel({ employee, setGlobalError }) {
   return <Card title="我的月統計"><div className="mb-4 max-w-xs"><Input label="月份" type="month" value={month} onChange={setMonth} /></div><div className="grid gap-4 md:grid-cols-3"><InfoBox label="總分鐘" value={`${totalMinutes} 分`} /><InfoBox label="總工時" value={`${formatHours(totalMinutes)} 小時`} /><InfoBox label="預估薪資" value={`$${Math.round(salary).toLocaleString()}`} /></div><RecordTable records={records} /></Card>;
 }
 
-function AdminPanel({ currentUser, setGlobalError }) {
+function CompanyLocationPanel({ companyLocations, setCompanyLocations, setGlobalError }) {
+  const [form, setForm] = useState({ name: "", latitude: "", longitude: "", radiusMeters: 150 });
+  const [saving, setSaving] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [editingIndex, setEditingIndex] = useState(null);
+
+  async function saveLocations(nextLocations) {
+    setSaving(true);
+    const ok = await safeRun(() => setDoc(doc(db, "settings", "companyLocations"), { locations: nextLocations, updatedAt: serverTimestamp() }, { merge: true }), "儲存公司定位設定失敗。", setGlobalError);
+    if (ok !== null) setCompanyLocations(nextLocations);
+    setSaving(false);
+  }
+
+  async function addLocation(e) {
+    e.preventDefault();
+    if (!form.name.trim()) return alert("請填寫地點名稱");
+    if (!form.latitude || !form.longitude) return alert("請填寫緯度與經度");
+    const nextLocation = { name: form.name.trim(), latitude: Number(form.latitude), longitude: Number(form.longitude), radiusMeters: Number(form.radiusMeters || 150) };
+    if (Number.isNaN(nextLocation.latitude) || Number.isNaN(nextLocation.longitude)) return alert("緯度與經度必須是數字");
+    await saveLocations([...companyLocations, nextLocation]);
+    setForm({ name: "", latitude: "", longitude: "", radiusMeters: 150 });
+  }
+
+  async function updateLocation(index, patch) {
+    const nextLocations = companyLocations.map((location, i) => i === index ? { ...location, ...patch } : location);
+    await saveLocations(nextLocations);
+  }
+
+  async function deleteLocation(index) {
+    const okConfirm = window.confirm("確定刪除這個公司打卡位置？");
+    if (!okConfirm) return;
+    const nextLocations = companyLocations.filter((_, i) => i !== index);
+    await saveLocations(nextLocations);
+  }
+
+  async function useCurrentLocation() {
+    try {
+      const position = await getCurrentPositionSafe();
+      setForm((prev) => ({ ...prev, latitude: String(position.coords.latitude), longitude: String(position.coords.longitude) }));
+    } catch (err) {
+      console.error(err);
+      alert(err?.message || "取得目前定位失敗，請確認瀏覽器定位權限已開啟。");
+    }
+  }
+
+  return <Card title="公司定位設定" subtitle="設定允許打卡的位置與半徑。員工打卡時必須在任一地點範圍內。"><div className="mb-4 flex items-center justify-between"><div className="text-sm text-neutral-500">目前共 {companyLocations.length} 個打卡地點</div><button type="button" onClick={() => setExpanded(!expanded)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{expanded ? "收合設定" : "展開設定"}</button></div>{expanded && <><form onSubmit={addLocation} className="mb-5 grid gap-3 rounded-2xl bg-neutral-50 p-4 md:grid-cols-5"><Input label="地點名稱" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><Input label="緯度 latitude" type="number" value={String(form.latitude)} onChange={(v) => setForm({ ...form, latitude: v })} /><Input label="經度 longitude" type="number" value={String(form.longitude)} onChange={(v) => setForm({ ...form, longitude: v })} /><Input label="允許半徑/公尺" type="number" value={String(form.radiusMeters)} onChange={(v) => setForm({ ...form, radiusMeters: Number(v || 150) })} /><div className="grid gap-2"><button type="button" onClick={useCurrentLocation} className="rounded-2xl bg-white px-4 py-3 text-sm font-bold text-neutral-700">使用目前位置</button><button disabled={saving} className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-bold text-white disabled:opacity-50">新增地點</button></div></form><div className="space-y-3">{companyLocations.length === 0 ? <div className="rounded-2xl bg-amber-50 p-4 text-sm text-amber-800">尚未設定公司位置。未設定時，建議先新增至少一個位置再正式使用打卡。</div> : companyLocations.map((location, index) => {
+        const isEditing = editingIndex === index;
+        return <div key={`${location.name}-${index}`} className="rounded-2xl border p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="font-bold">{location.name}</div>
+              <div className="text-xs text-neutral-500">{location.radiusMeters} 公尺內可打卡</div>
+            </div>
+            <div className="flex gap-2">
+              <button type="button" onClick={() => setEditingIndex(isEditing ? null : index)} className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button>
+              <button type="button" onClick={() => deleteLocation(index)} className="rounded-xl bg-red-50 px-4 py-2 text-sm font-bold text-red-700">刪除</button>
+            </div>
+          </div>
+
+          {isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-4">
+            <Input label="地點名稱" value={location.name || ""} onChange={(v) => updateLocation(index, { name: v })} />
+            <Input label="緯度" type="number" value={String(location.latitude || "")} onChange={(v) => updateLocation(index, { latitude: Number(v || 0) })} />
+            <Input label="經度" type="number" value={String(location.longitude || "")} onChange={(v) => updateLocation(index, { longitude: Number(v || 0) })} />
+            <Input label="半徑/公尺" type="number" value={String(location.radiusMeters || 150)} onChange={(v) => updateLocation(index, { radiusMeters: Number(v || 150) })} />
+          </div>}
+        </div>;
+      })}</div></>}</Card>;
+}
+
+function AdminPanel({ currentUser, setGlobalError, companyLocations, setCompanyLocations }) {
+  const [employeesExpanded, setEmployeesExpanded] = useState(false);
+  const [attendanceExpanded, setAttendanceExpanded] = useState(false);
+  const [correctionsExpanded, setCorrectionsExpanded] = useState(false);
   const [employees, setEmployees] = useState([]);
   const [corrections, setCorrections] = useState([]);
   const [todayRecords, setTodayRecords] = useState([]);
@@ -582,7 +825,7 @@ function AdminPanel({ currentUser, setGlobalError }) {
   const [editingAttendanceId, setEditingAttendanceId] = useState(null);
   const [creatingCorrection, setCreatingCorrection] = useState(false);
   const [editingCorrectionId, setEditingCorrectionId] = useState(null);
-  const [manualEmployeeForm, setManualEmployeeForm] = useState({ lineUserId: "", name: "", displayName: "", phone: "", role: "employee", status: "active", departments: ["烘焙坊"], hourlyWage: 190, note: "" });
+  const [manualEmployeeForm, setManualEmployeeForm] = useState({ lineUserId: "", name: "", displayName: "", phone: "", role: "employee", status: "active", employeeType: "hourly", departments: ["烘焙坊"], hourlyWage: 190, baseSalary: 0, overtimeHourlyWage: 190, note: "" });
   const [attendanceForm, setAttendanceForm] = useState({ employeeId: "", date: todayString(), clockIn: "09:00", clockOut: "18:00", department: "烘焙坊", source: "manual", note: "" });
   const [correctionForm, setCorrectionForm] = useState({ employeeId: "", type: "clockIn", date: todayString(), time: "09:00", reason: "主管手動新增", status: "pending" });
   useEffect(() => { loadAll(); }, []);
@@ -604,7 +847,7 @@ function AdminPanel({ currentUser, setGlobalError }) {
   }
   async function updateEmployee(emp, patch) { const ok = await safeRun(() => updateDoc(doc(db, "employees", emp.id), { ...patch, updatedAt: serverTimestamp() }), "更新員工資料失敗。", setGlobalError); if (ok !== null) await loadAll(); }
   async function deleteEmployee(emp) { if (!window.confirm(`確定刪除員工「${emp.name || emp.displayName || emp.id}」？\n注意：這不會自動刪除他的既有打卡紀錄。`)) return; const ok = await safeRun(() => deleteDoc(doc(db, "employees", emp.id)), "刪除員工失敗。", setGlobalError); if (ok !== null) await loadAll(); }
-  async function createManualEmployee(e) { e.preventDefault(); if (!manualEmployeeForm.name.trim()) return alert("請填寫員工姓名"); const data = buildManualEmployeeData(manualEmployeeForm); const ok = await safeRun(() => setDoc(doc(db, "employees", data.lineUserId), { ...data, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }, { merge: true }), "建立員工資料失敗。", setGlobalError); if (ok !== null) { setManualEmployeeForm({ lineUserId: "", name: "", displayName: "", phone: "", role: "employee", status: "active", departments: ["烘焙坊"], hourlyWage: 190, note: "" }); setCreatingEmployee(false); await loadAll(); } }
+  async function createManualEmployee(e) { e.preventDefault(); if (!manualEmployeeForm.name.trim()) return alert("請填寫員工姓名"); const data = buildManualEmployeeData(manualEmployeeForm); const ok = await safeRun(() => setDoc(doc(db, "employees", data.lineUserId), { ...data, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }, { merge: true }), "建立員工資料失敗。", setGlobalError); if (ok !== null) { setManualEmployeeForm({ lineUserId: "", name: "", displayName: "", phone: "", role: "employee", status: "active", employeeType: "hourly", departments: ["烘焙坊"], hourlyWage: 190, baseSalary: 0, overtimeHourlyWage: 190, note: "" }); setCreatingEmployee(false); await loadAll(); } }
   function getEmployeeByLineId(employeeId) { return employees.find((emp) => (emp.lineUserId || emp.id) === employeeId); }
   function buildAttendancePayload(form) { const emp = getEmployeeByLineId(form.employeeId); const employeeName = emp?.name || emp?.displayName || "未命名員工"; const workMinutes = form.clockIn && form.clockOut ? minutesBetween(form.clockIn, form.clockOut) : 0; return { employeeId: form.employeeId, employeeName, department: form.department || emp?.department || getEmployeeDepartments(emp)[0] || "未設定", date: form.date, month: form.date.slice(0, 7), clockIn: form.clockIn || "", clockOut: form.clockOut || "", workMinutes, workHours: formatHours(workMinutes), attendanceStatus: "manualCorrection", lateMinutes: 0, earlyLeaveMinutes: 0, source: form.source || "manual", status: form.clockIn && form.clockOut ? "completed" : "open", note: form.note || "主管手動建立/修改", updatedAt: serverTimestamp() }; }
   async function createAttendanceRecord(e) { e.preventDefault(); if (!attendanceForm.employeeId) return alert("請選擇員工"); if (!attendanceForm.date) return alert("請選擇日期"); const payload = buildAttendancePayload(attendanceForm); const ok = await safeRun(() => addDoc(collection(db, "attendanceRecords"), { ...payload, createdAt: serverTimestamp() }), "新增打卡紀錄失敗。", setGlobalError); if (ok !== null) { setCreatingAttendance(false); await loadAll(); } }
@@ -616,7 +859,7 @@ function AdminPanel({ currentUser, setGlobalError }) {
   async function deleteCorrectionRequest(item) { if (!window.confirm(`確定刪除 ${item.employeeName} ${item.date} 的補卡申請？`)) return; const ok = await safeRun(() => deleteDoc(doc(db, "correctionRequests", item.id)), "刪除補卡資料失敗。", setGlobalError); if (ok !== null) await loadAll(); }
   async function reviewCorrection(item, approved) { const update = approved ? { status: "approved" } : { status: "rejected" }; const ok = await safeRun(() => updateDoc(doc(db, "correctionRequests", item.id), { ...update, reviewedBy: currentUser.name, reviewedAt: serverTimestamp(), updatedAt: serverTimestamp() }), "更新補卡審核失敗。", setGlobalError); if (ok !== null) await loadAll(); }
   const activeEmployees = employees.filter((emp) => emp.status !== "disabled");
-  return <div className="space-y-5"><Card title="員工管理" subtitle="預設顯示員工摘要，點擊修改後才展開詳細資料。"><div className="mb-5 rounded-3xl border border-neutral-200 bg-neutral-50 p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="font-bold">手動新增員工</h3><p className="mt-1 text-xs text-neutral-500">LINE ID 可先留空，系統會產生 MANUAL ID。</p></div><button type="button" onClick={() => setCreatingEmployee(!creatingEmployee)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingEmployee ? "收合" : "新增員工"}</button></div>{creatingEmployee && <form onSubmit={createManualEmployee} className="grid gap-3 md:grid-cols-3"><Input label="員工姓名" value={manualEmployeeForm.name} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, name: v })} /><Input label="LINE User ID / 員工ID（可先留空）" value={manualEmployeeForm.lineUserId} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, lineUserId: v })} /><Input label="電話" value={manualEmployeeForm.phone} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, phone: v })} /><Select label="狀態" value={manualEmployeeForm.status} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, status: v })}><option value="pending">待審核</option><option value="active">啟用</option><option value="disabled">停用</option></Select><Select label="權限" value={manualEmployeeForm.role} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, role: v })}><option value="employee">員工</option><option value="manager">管理員</option><option value="owner">老闆</option></Select><Input label="時薪" type="number" value={String(manualEmployeeForm.hourlyWage)} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, hourlyWage: Number(v || 0) })} /><div className="md:col-span-2"><DepartmentCheckboxes label="可支援部門" value={manualEmployeeForm.departments} onChange={(departments) => setManualEmployeeForm({ ...manualEmployeeForm, departments })} /></div><Input label="備註" value={manualEmployeeForm.note} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-3">建立員工資料</button></form>}</div><div className="space-y-3">{employees.map((emp) => { const isEditing = editingEmployeeId === emp.id; const statusLabel = emp.status === "active" ? "啟用" : emp.status === "pending" ? "待審核" : emp.status === "disabled" ? "停用" : emp.status || "未知"; const roleLabel = emp.role === "owner" ? "老闆" : emp.role === "manager" ? "管理員" : "員工"; return <div key={emp.id} className="rounded-2xl border bg-white p-3"><div className="grid gap-3 md:grid-cols-[1.5fr_1fr_1fr_1fr_auto_auto] md:items-center"><div><div className="font-bold">{emp.name || emp.displayName || "未命名員工"}</div><div className="break-all text-xs text-neutral-500">{emp.lineUserId || emp.id}</div></div><div className="text-sm"><span className={`rounded-full px-3 py-1 font-bold ${emp.status === "active" ? "bg-green-50 text-green-700" : emp.status === "disabled" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{statusLabel}</span></div><div className="text-sm text-neutral-600">{roleLabel}</div><div className="text-sm text-neutral-600">{getEmployeeDepartments(emp).join("、")}｜${Number(emp.hourlyWage || 0)}/hr</div><button type="button" onClick={() => setEditingEmployeeId(isEditing ? null : emp.id)} className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button type="button" onClick={() => deleteEmployee(emp)} className="rounded-xl bg-red-50 px-4 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-4"><Input label="姓名" value={emp.name || ""} onChange={(v) => updateEmployee(emp, { name: v })} /><Input label="電話" value={emp.phone || ""} onChange={(v) => updateEmployee(emp, { phone: v })} /><Select label="狀態" value={emp.status || "pending"} onChange={(v) => updateEmployee(emp, { status: v })}><option value="pending">待審核</option><option value="active">啟用</option><option value="disabled">停用</option></Select><Select label="權限" value={emp.role || "employee"} onChange={(v) => updateEmployee(emp, { role: v })}><option value="employee">員工</option><option value="manager">管理員</option><option value="owner">老闆</option></Select><div className="md:col-span-2"><DepartmentCheckboxes label="可支援部門" value={getEmployeeDepartments(emp)} onChange={(departments) => updateEmployee(emp, { departments, department: departments[0] || "烘焙坊" })} /></div><Input label="時薪" type="number" value={String(emp.hourlyWage || 0)} onChange={(v) => updateEmployee(emp, { hourlyWage: Number(v || 0) })} /><Input label="備註" value={emp.note || ""} onChange={(v) => updateEmployee(emp, { note: v })} /></div>}</div>; })}</div></Card><Card title="打卡紀錄管理" subtitle="主管可手動新增、修改、刪除打卡紀錄。"><div className="mb-4 flex justify-end"><button type="button" onClick={() => setCreatingAttendance(!creatingAttendance)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingAttendance ? "收合新增" : "新增打卡紀錄"}</button></div>{creatingAttendance && <form onSubmit={createAttendanceRecord} className="mb-5 grid gap-3 rounded-2xl bg-neutral-50 p-4 md:grid-cols-4"><Select label="員工" value={attendanceForm.employeeId} onChange={(v) => { const emp = getEmployeeByLineId(v); setAttendanceForm({ ...attendanceForm, employeeId: v, department: emp?.department || getEmployeeDepartments(emp)[0] || "烘焙坊" }); }}>{activeEmployees.map((emp) => <option key={emp.id} value={emp.lineUserId || emp.id}>{emp.name || emp.displayName}</option>)}</Select><Select label="部門" value={attendanceForm.department} onChange={(v) => setAttendanceForm({ ...attendanceForm, department: v })}>{DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}</Select><Input label="日期" type="date" value={attendanceForm.date} onChange={(v) => setAttendanceForm({ ...attendanceForm, date: v })} /><Input label="上班" type="time" value={attendanceForm.clockIn} onChange={(v) => setAttendanceForm({ ...attendanceForm, clockIn: v })} /><Input label="下班" type="time" value={attendanceForm.clockOut} onChange={(v) => setAttendanceForm({ ...attendanceForm, clockOut: v })} /><Input label="備註" value={attendanceForm.note} onChange={(v) => setAttendanceForm({ ...attendanceForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-2">建立打卡紀錄</button></form>}<div className="space-y-3">{todayRecords.map((record) => { const isEditing = editingAttendanceId === record.id; return <div key={record.id} className="rounded-2xl border p-3"><div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto_auto] md:items-center"><div className="font-bold">{record.employeeName}</div><div>{record.date}</div><div>{record.clockIn || "-"} - {record.clockOut || "-"}</div><div>{record.workHours || 0} 小時｜{getAttendanceStatusText(record.attendanceStatus)}</div><button onClick={() => setEditingAttendanceId(isEditing ? null : record.id)} className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button onClick={() => deleteAttendanceRecord(record)} className="rounded-xl bg-red-50 px-4 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-5"><Input label="日期" type="date" value={record.date || ""} onChange={(v) => updateAttendanceRecord(record, { date: v })} /><Input label="上班" type="time" value={record.clockIn || ""} onChange={(v) => updateAttendanceRecord(record, { clockIn: v })} /><Input label="下班" type="time" value={record.clockOut || ""} onChange={(v) => updateAttendanceRecord(record, { clockOut: v })} /><Select label="狀態" value={record.attendanceStatus || "normal"} onChange={(v) => updateAttendanceRecord(record, { attendanceStatus: v })}><option value="normal">正常</option><option value="late">遲到</option><option value="earlyLeave">早退</option><option value="lateAndEarlyLeave">遲到＋早退</option><option value="noSchedule">無排班打卡</option><option value="manualCorrection">補卡修正</option></Select><Input label="備註" value={record.note || ""} onChange={(v) => updateAttendanceRecord(record, { note: v })} /></div>}</div>; })}</div></Card><Card title="補卡審核管理" subtitle="主管可新增、修改、刪除補卡資料，也可通過或退回。"><div className="mb-4 flex justify-end"><button type="button" onClick={() => setCreatingCorrection(!creatingCorrection)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingCorrection ? "收合新增" : "新增補卡資料"}</button></div>{creatingCorrection && <form onSubmit={createCorrectionRequest} className="mb-5 grid gap-3 rounded-2xl bg-neutral-50 p-4 md:grid-cols-4"><Select label="員工" value={correctionForm.employeeId} onChange={(v) => setCorrectionForm({ ...correctionForm, employeeId: v })}>{activeEmployees.map((emp) => <option key={emp.id} value={emp.lineUserId || emp.id}>{emp.name || emp.displayName}</option>)}</Select><Select label="類型" value={correctionForm.type} onChange={(v) => setCorrectionForm({ ...correctionForm, type: v })}><option value="clockIn">補上班卡</option><option value="clockOut">補下班卡</option></Select><Input label="日期" type="date" value={correctionForm.date} onChange={(v) => setCorrectionForm({ ...correctionForm, date: v })} /><Input label="時間" type="time" value={correctionForm.time} onChange={(v) => setCorrectionForm({ ...correctionForm, time: v })} /><Select label="狀態" value={correctionForm.status} onChange={(v) => setCorrectionForm({ ...correctionForm, status: v })}><option value="pending">待審核</option><option value="approved">已通過</option><option value="rejected">已退回</option></Select><Input label="原因" value={correctionForm.reason} onChange={(v) => setCorrectionForm({ ...correctionForm, reason: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-2">建立補卡資料</button></form>}<div className="space-y-3">{corrections.map((item) => { const isEditing = editingCorrectionId === item.id; return <div key={item.id} className="rounded-2xl border p-3"><div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto_auto_auto_auto] md:items-center"><div className="font-bold">{item.employeeName}</div><div>{item.date} {item.time}</div><div>{item.type === "clockIn" ? "補上班" : "補下班"}</div><div>{statusText(item.status)}</div><button onClick={() => reviewCorrection(item, true)} className="rounded-xl bg-green-50 px-3 py-2 text-sm font-bold text-green-700">通過</button><button onClick={() => reviewCorrection(item, false)} className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-700">退回</button><button onClick={() => setEditingCorrectionId(isEditing ? null : item.id)} className="rounded-xl bg-neutral-900 px-3 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button onClick={() => deleteCorrectionRequest(item)} className="rounded-xl bg-red-50 px-3 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-5"><Select label="類型" value={item.type || "clockIn"} onChange={(v) => updateCorrectionRequest(item, { type: v })}><option value="clockIn">補上班卡</option><option value="clockOut">補下班卡</option></Select><Input label="日期" type="date" value={item.date || ""} onChange={(v) => updateCorrectionRequest(item, { date: v })} /><Input label="時間" type="time" value={item.time || ""} onChange={(v) => updateCorrectionRequest(item, { time: v })} /><Select label="狀態" value={item.status || "pending"} onChange={(v) => updateCorrectionRequest(item, { status: v })}><option value="pending">待審核</option><option value="approved">已通過</option><option value="rejected">已退回</option></Select><Input label="原因" value={item.reason || ""} onChange={(v) => updateCorrectionRequest(item, { reason: v })} /></div>}</div>; })}</div></Card></div>;
+  return <div className="space-y-5"><CompanyLocationPanel companyLocations={companyLocations} setCompanyLocations={setCompanyLocations} setGlobalError={setGlobalError} /><Card title="員工管理" subtitle="預設顯示員工摘要，點擊修改後才展開詳細資料。"><div className="mb-4 flex items-center justify-between"><div className="text-sm text-neutral-500">目前共 {employees.length} 位員工</div><button type="button" onClick={() => setEmployeesExpanded(!employeesExpanded)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{employeesExpanded ? "收合" : "展開"}</button></div>{employeesExpanded && <><div className="mb-5 rounded-3xl border border-neutral-200 bg-neutral-50 p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="font-bold">手動新增員工</h3><p className="mt-1 text-xs text-neutral-500">LINE ID 可先留空，系統會產生 MANUAL ID。</p></div><button type="button" onClick={() => setCreatingEmployee(!creatingEmployee)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingEmployee ? "收合" : "新增員工"}</button></div>{creatingEmployee && <form onSubmit={createManualEmployee} className="grid gap-3 md:grid-cols-3"><Input label="員工姓名" value={manualEmployeeForm.name} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, name: v })} /><Input label="LINE User ID / 員工ID（可先留空）" value={manualEmployeeForm.lineUserId} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, lineUserId: v })} /><Input label="電話" value={manualEmployeeForm.phone} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, phone: v })} /><Select label="狀態" value={manualEmployeeForm.status} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, status: v })}><option value="pending">待審核</option><option value="active">啟用</option><option value="disabled">停用</option></Select><Select label="權限" value={manualEmployeeForm.role} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, role: v })}><option value="employee">員工</option><option value="manager">管理員</option><option value="owner">老闆</option></Select><Select label="薪資類型" value={manualEmployeeForm.employeeType} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, employeeType: v })}><option value="hourly">時薪員工</option><option value="fullTime">正職員工</option></Select>{manualEmployeeForm.employeeType === "hourly" ? <Input label="時薪" type="number" value={String(manualEmployeeForm.hourlyWage)} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, hourlyWage: Number(v || 0), overtimeHourlyWage: Number(v || 0) })} /> : <><Input label="底薪" type="number" value={String(manualEmployeeForm.baseSalary)} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, baseSalary: Number(v || 0) })} /><Input label="加班時薪" type="number" value={String(manualEmployeeForm.overtimeHourlyWage)} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, overtimeHourlyWage: Number(v || 0) })} /></>}<div className="md:col-span-2"><DepartmentCheckboxes label="可支援部門" value={manualEmployeeForm.departments} onChange={(departments) => setManualEmployeeForm({ ...manualEmployeeForm, departments })} /></div><Input label="備註" value={manualEmployeeForm.note} onChange={(v) => setManualEmployeeForm({ ...manualEmployeeForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-3">建立員工資料</button></form>}</div><div className="space-y-3">{employees.map((emp) => { const isEditing = editingEmployeeId === emp.id; const statusLabel = emp.status === "active" ? "啟用" : emp.status === "pending" ? "待審核" : emp.status === "disabled" ? "停用" : emp.status || "未知"; const roleLabel = emp.role === "owner" ? "老闆" : emp.role === "manager" ? "管理員" : "員工"; return <div key={emp.id} className="rounded-2xl border bg-white p-3"><div className="grid gap-3 md:grid-cols-[1.5fr_1fr_1fr_1fr_auto_auto] md:items-center"><div><div className="font-bold">{emp.name || emp.displayName || "未命名員工"}</div><div className="break-all text-xs text-neutral-500">{emp.lineUserId || emp.id}</div></div><div className="text-sm"><span className={`rounded-full px-3 py-1 font-bold ${emp.status === "active" ? "bg-green-50 text-green-700" : emp.status === "disabled" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{statusLabel}</span></div><div className="text-sm text-neutral-600">{roleLabel}</div><div className="text-sm text-neutral-600">{getEmployeeDepartments(emp).join("、")}｜{emp.employeeType === "fullTime" ? `正職 $${Number(emp.baseSalary || 0).toLocaleString()}＋加班$${Number(emp.overtimeHourlyWage || 0)}/hr` : `時薪 $${Number(emp.hourlyWage || 0)}/hr`}</div><button type="button" onClick={() => setEditingEmployeeId(isEditing ? null : emp.id)} className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button type="button" onClick={() => deleteEmployee(emp)} className="rounded-xl bg-red-50 px-4 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-4"><Input label="姓名" value={emp.name || ""} onChange={(v) => updateEmployee(emp, { name: v })} /><Input label="電話" value={emp.phone || ""} onChange={(v) => updateEmployee(emp, { phone: v })} /><Select label="狀態" value={emp.status || "pending"} onChange={(v) => updateEmployee(emp, { status: v })}><option value="pending">待審核</option><option value="active">啟用</option><option value="disabled">停用</option></Select><Select label="權限" value={emp.role || "employee"} onChange={(v) => updateEmployee(emp, { role: v })}><option value="employee">員工</option><option value="manager">管理員</option><option value="owner">老闆</option></Select><div className="md:col-span-2"><DepartmentCheckboxes label="可支援部門" value={getEmployeeDepartments(emp)} onChange={(departments) => updateEmployee(emp, { departments, department: departments[0] || "烘焙坊" })} /></div><Select label="薪資類型" value={emp.employeeType || "hourly"} onChange={(v) => updateEmployee(emp, { employeeType: v })}><option value="hourly">時薪員工</option><option value="fullTime">正職員工</option></Select>{(emp.employeeType || "hourly") === "hourly" ? <Input label="時薪" type="number" value={String(emp.hourlyWage || 0)} onChange={(v) => updateEmployee(emp, { hourlyWage: Number(v || 0), overtimeHourlyWage: Number(v || 0) })} /> : <><Input label="底薪" type="number" value={String(emp.baseSalary || 0)} onChange={(v) => updateEmployee(emp, { baseSalary: Number(v || 0) })} /><Input label="加班時薪" type="number" value={String(emp.overtimeHourlyWage || 0)} onChange={(v) => updateEmployee(emp, { overtimeHourlyWage: Number(v || 0) })} /></>}<Input label="備註" value={emp.note || ""} onChange={(v) => updateEmployee(emp, { note: v })} /></div>}</div>; })}</div></>}</Card><Card title="打卡紀錄管理" subtitle="主管可手動新增、修改、刪除打卡紀錄。"><div className="mb-4 flex items-center justify-between"><div className="text-sm text-neutral-500">今日共 {todayRecords.length} 筆打卡紀錄</div><button type="button" onClick={() => setAttendanceExpanded(!attendanceExpanded)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{attendanceExpanded ? "收合" : "展開"}</button></div>{attendanceExpanded && <><div className="mb-4 flex justify-end"><button type="button" onClick={() => setCreatingAttendance(!creatingAttendance)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingAttendance ? "收合新增" : "新增打卡紀錄"}</button></div>{creatingAttendance && <form onSubmit={createAttendanceRecord} className="mb-5 grid gap-3 rounded-2xl bg-neutral-50 p-4 md:grid-cols-4"><Select label="員工" value={attendanceForm.employeeId} onChange={(v) => { const emp = getEmployeeByLineId(v); setAttendanceForm({ ...attendanceForm, employeeId: v, department: emp?.department || getEmployeeDepartments(emp)[0] || "烘焙坊" }); }}>{activeEmployees.map((emp) => <option key={emp.id} value={emp.lineUserId || emp.id}>{emp.name || emp.displayName}</option>)}</Select><Select label="部門" value={attendanceForm.department} onChange={(v) => setAttendanceForm({ ...attendanceForm, department: v })}>{DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}</Select><Input label="日期" type="date" value={attendanceForm.date} onChange={(v) => setAttendanceForm({ ...attendanceForm, date: v })} /><Input label="上班" type="time" value={attendanceForm.clockIn} onChange={(v) => setAttendanceForm({ ...attendanceForm, clockIn: v })} /><Input label="下班" type="time" value={attendanceForm.clockOut} onChange={(v) => setAttendanceForm({ ...attendanceForm, clockOut: v })} /><Input label="備註" value={attendanceForm.note} onChange={(v) => setAttendanceForm({ ...attendanceForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-2">建立打卡紀錄</button></form>}<div className="space-y-3">{todayRecords.map((record) => { const isEditing = editingAttendanceId === record.id; return <div key={record.id} className="rounded-2xl border p-3"><div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto_auto] md:items-center"><div className="font-bold">{record.employeeName}</div><div>{record.date}</div><div>{record.clockIn || "-"} - {record.clockOut || "-"}</div><div>{record.workHours || 0} 小時｜{getAttendanceStatusText(record.attendanceStatus)}</div><button onClick={() => setEditingAttendanceId(isEditing ? null : record.id)} className="rounded-xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button onClick={() => deleteAttendanceRecord(record)} className="rounded-xl bg-red-50 px-4 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-5"><Input label="日期" type="date" value={record.date || ""} onChange={(v) => updateAttendanceRecord(record, { date: v })} /><Input label="上班" type="time" value={record.clockIn || ""} onChange={(v) => updateAttendanceRecord(record, { clockIn: v })} /><Input label="下班" type="time" value={record.clockOut || ""} onChange={(v) => updateAttendanceRecord(record, { clockOut: v })} /><Select label="狀態" value={record.attendanceStatus || "normal"} onChange={(v) => updateAttendanceRecord(record, { attendanceStatus: v })}><option value="normal">正常</option><option value="late">遲到</option><option value="earlyLeave">早退</option><option value="lateAndEarlyLeave">遲到＋早退</option><option value="noSchedule">無排班打卡</option><option value="manualCorrection">補卡修正</option></Select><Input label="備註" value={record.note || ""} onChange={(v) => updateAttendanceRecord(record, { note: v })} /></div>}</div>; })}</div></>}</Card><Card title="補卡審核管理" subtitle="主管可新增、修改、刪除補卡資料，也可通過或退回。"><div className="mb-4 flex items-center justify-between"><div className="text-sm text-neutral-500">目前共 {corrections.length} 筆補卡申請</div><button type="button" onClick={() => setCorrectionsExpanded(!correctionsExpanded)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{correctionsExpanded ? "收合" : "展開"}</button></div>{correctionsExpanded && <><div className="mb-4 flex justify-end"><button type="button" onClick={() => setCreatingCorrection(!creatingCorrection)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingCorrection ? "收合新增" : "新增補卡資料"}</button></div>{creatingCorrection && <form onSubmit={createCorrectionRequest} className="mb-5 grid gap-3 rounded-2xl bg-neutral-50 p-4 md:grid-cols-4"><Select label="員工" value={correctionForm.employeeId} onChange={(v) => setCorrectionForm({ ...correctionForm, employeeId: v })}>{activeEmployees.map((emp) => <option key={emp.id} value={emp.lineUserId || emp.id}>{emp.name || emp.displayName}</option>)}</Select><Select label="類型" value={correctionForm.type} onChange={(v) => setCorrectionForm({ ...correctionForm, type: v })}><option value="clockIn">補上班卡</option><option value="clockOut">補下班卡</option></Select><Input label="日期" type="date" value={correctionForm.date} onChange={(v) => setCorrectionForm({ ...correctionForm, date: v })} /><Input label="時間" type="time" value={correctionForm.time} onChange={(v) => setCorrectionForm({ ...correctionForm, time: v })} /><Select label="狀態" value={correctionForm.status} onChange={(v) => setCorrectionForm({ ...correctionForm, status: v })}><option value="pending">待審核</option><option value="approved">已通過</option><option value="rejected">已退回</option></Select><Input label="原因" value={correctionForm.reason} onChange={(v) => setCorrectionForm({ ...correctionForm, reason: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white md:col-span-2">建立補卡資料</button></form>}<div className="space-y-3">{corrections.map((item) => { const isEditing = editingCorrectionId === item.id; return <div key={item.id} className="rounded-2xl border p-3"><div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto_auto_auto_auto] md:items-center"><div className="font-bold">{item.employeeName}</div><div>{item.date} {item.time}</div><div>{item.type === "clockIn" ? "補上班" : "補下班"}</div><div>{statusText(item.status)}</div><button onClick={() => reviewCorrection(item, true)} className="rounded-xl bg-green-50 px-3 py-2 text-sm font-bold text-green-700">通過</button><button onClick={() => reviewCorrection(item, false)} className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-700">退回</button><button onClick={() => setEditingCorrectionId(isEditing ? null : item.id)} className="rounded-xl bg-neutral-900 px-3 py-2 text-sm font-bold text-white">{isEditing ? "收合" : "修改"}</button><button onClick={() => deleteCorrectionRequest(item)} className="rounded-xl bg-red-50 px-3 py-2 text-sm font-bold text-red-700">刪除</button></div>{isEditing && <div className="mt-4 grid gap-3 border-t pt-4 md:grid-cols-5"><Select label="類型" value={item.type || "clockIn"} onChange={(v) => updateCorrectionRequest(item, { type: v })}><option value="clockIn">補上班卡</option><option value="clockOut">補下班卡</option></Select><Input label="日期" type="date" value={item.date || ""} onChange={(v) => updateCorrectionRequest(item, { date: v })} /><Input label="時間" type="time" value={item.time || ""} onChange={(v) => updateCorrectionRequest(item, { time: v })} /><Select label="狀態" value={item.status || "pending"} onChange={(v) => updateCorrectionRequest(item, { status: v })}><option value="pending">待審核</option><option value="approved">已通過</option><option value="rejected">已退回</option></Select><Input label="原因" value={item.reason || ""} onChange={(v) => updateCorrectionRequest(item, { reason: v })} /></div>}</div>; })}</div></>}</Card></div>;
 }
 
 function SchedulePanel({ setGlobalError }) {
@@ -659,10 +902,64 @@ function SalaryPanel({ setGlobalError }) {
   const [month, setMonth] = useState(getMonthString());
   const [employees, setEmployees] = useState([]);
   const [records, setRecords] = useState([]);
+  const [adjustments, setAdjustments] = useState([]);
+  const [creatingAdjustment, setCreatingAdjustment] = useState(false);
+  const [adjustmentForm, setAdjustmentForm] = useState({ employeeId: "", type: "deduction", title: "請假扣費", amount: 0, note: "" });
   useEffect(() => { load(); }, [month]);
-  async function load() { const employeeSnap = await safeRun(() => getDocs(query(collection(db, "employees"), where("status", "==", "active"))), "讀取薪資員工清單失敗。", setGlobalError); if (employeeSnap) setEmployees(sortByFieldAsc(employeeSnap.docs.map((d) => ({ id: d.id, ...d.data() })), "name")); const recordSnap = await safeRun(() => getDocs(query(collection(db, "attendanceRecords"), where("month", "==", month))), "讀取薪資月報失敗。", setGlobalError); if (recordSnap) setRecords(sortByFieldAsc(recordSnap.docs.map((d) => ({ id: d.id, ...d.data() })), "date")); }
-  const rows = employees.map((emp) => { const empRecords = records.filter((r) => r.employeeId === emp.lineUserId); const totalMinutes = empRecords.reduce((sum, r) => sum + Number(r.workMinutes || 0), 0); const hours = formatHours(totalMinutes); return { id: emp.id, name: emp.name || emp.displayName, department: getEmployeeDepartments(emp).join("、"), hourlyWage: Number(emp.hourlyWage || 0), totalMinutes, hours, salary: Math.round(hours * Number(emp.hourlyWage || 0)), days: empRecords.length, abnormalCount: empRecords.filter((r) => r.attendanceStatus && r.attendanceStatus !== "normal").length }; });
-  return <Card title="薪資月報"><div className="mb-4 max-w-xs"><Input label="月份" type="month" value={month} onChange={setMonth} /></div><div className="overflow-x-auto"><table className="w-full min-w-[820px] border-separate border-spacing-y-2 text-sm"><thead className="text-left text-neutral-500"><tr><th className="px-3 py-2">員工</th><th className="px-3 py-2">可支援部門</th><th className="px-3 py-2">出勤天數</th><th className="px-3 py-2">總分鐘</th><th className="px-3 py-2">總工時</th><th className="px-3 py-2">時薪</th><th className="px-3 py-2">異常</th><th className="px-3 py-2">預估薪資</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id} className="bg-neutral-100"><td className="rounded-l-2xl px-3 py-3 font-bold">{row.name}</td><td className="px-3 py-3">{row.department}</td><td className="px-3 py-3">{row.days}</td><td className="px-3 py-3">{row.totalMinutes}</td><td className="px-3 py-3">{row.hours}</td><td className="px-3 py-3">${row.hourlyWage}</td><td className="px-3 py-3">{row.abnormalCount}</td><td className="rounded-r-2xl px-3 py-3 font-bold">${row.salary.toLocaleString()}</td></tr>)}</tbody></table></div></Card>;
+  async function load() {
+    const employeeSnap = await safeRun(() => getDocs(query(collection(db, "employees"), where("status", "==", "active"))), "讀取薪資員工清單失敗。", setGlobalError);
+    if (employeeSnap) {
+      const rows = sortByFieldAsc(employeeSnap.docs.map((d) => ({ id: d.id, ...d.data() })), "name");
+      setEmployees(rows);
+      const first = rows.find((emp) => emp.role !== "owner") || rows[0];
+      if (first) setAdjustmentForm((prev) => ({ ...prev, employeeId: prev.employeeId || first.lineUserId || first.id }));
+    }
+    const recordSnap = await safeRun(() => getDocs(query(collection(db, "attendanceRecords"), where("month", "==", month))), "讀取薪資月報失敗。", setGlobalError);
+    if (recordSnap) setRecords(sortByFieldAsc(recordSnap.docs.map((d) => ({ id: d.id, ...d.data() })), "date"));
+    const adjustmentSnap = await safeRun(() => getDocs(query(collection(db, "payrollAdjustments"), where("month", "==", month), limit(200))), "讀取薪資調整項失敗。", setGlobalError);
+    if (adjustmentSnap) setAdjustments(sortByCreatedAtDesc(adjustmentSnap.docs.map((d) => ({ id: d.id, ...d.data() }))));
+  }
+  function getEmployeeByLineId(employeeId) { return employees.find((emp) => (emp.lineUserId || emp.id) === employeeId); }
+  async function createPayrollAdjustment(e) {
+    e.preventDefault();
+    if (!adjustmentForm.employeeId) return alert("請選擇員工");
+    if (!adjustmentForm.title.trim()) return alert("請填寫項目名稱");
+    if (Number(adjustmentForm.amount || 0) <= 0) return alert("金額必須大於 0");
+    const emp = getEmployeeByLineId(adjustmentForm.employeeId);
+    const payload = { employeeId: adjustmentForm.employeeId, employeeName: emp?.name || emp?.displayName || "未命名員工", month, type: adjustmentForm.type, title: adjustmentForm.title.trim(), amount: Number(adjustmentForm.amount || 0), note: adjustmentForm.note.trim(), createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
+    const ok = await safeRun(() => addDoc(collection(db, "payrollAdjustments"), payload), "新增薪資調整項失敗。", setGlobalError);
+    if (ok !== null) { setAdjustmentForm((prev) => ({ ...prev, title: prev.type === "addition" ? "獎金" : "請假扣費", amount: 0, note: "" })); setCreatingAdjustment(false); await load(); }
+  }
+  async function deletePayrollAdjustment(item) {
+    const okConfirm = window.confirm(`確定刪除「${item.employeeName}｜${item.title}｜$${Number(item.amount || 0).toLocaleString()}」？`);
+    if (!okConfirm) return;
+    const ok = await safeRun(() => deleteDoc(doc(db, "payrollAdjustments", item.id)), "刪除薪資調整項失敗。", setGlobalError);
+    if (ok !== null) await load();
+  }
+  const rows = employees.map((emp) => {
+    const empId = emp.lineUserId || emp.id;
+    const empRecords = records.filter((r) => r.employeeId === empId);
+    const empAdjustments = adjustments.filter((item) => item.employeeId === empId);
+    const totalMinutes = empRecords.reduce((sum, r) => sum + Number(r.workMinutes || 0), 0);
+    const salaryInfo = calculateSalary({ employeeType: emp.employeeType || "hourly", totalMinutes, hourlyWage: emp.hourlyWage, baseSalary: emp.baseSalary, overtimeHourlyWage: emp.overtimeHourlyWage, adjustments: empAdjustments });
+    return { id: emp.id, employeeId: empId, name: emp.name || emp.displayName, employeeType: emp.employeeType || "hourly", department: getEmployeeDepartments(emp).join("、"), hourlyWage: Number(emp.hourlyWage || 0), baseSalary: Number(emp.baseSalary || 0), overtimeHourlyWage: Number(emp.overtimeHourlyWage || 0), totalMinutes, hours: salaryInfo.hours, overtimeHours: salaryInfo.overtimeHours, basePay: salaryInfo.basePay, overtimePay: salaryInfo.overtimePay, additions: salaryInfo.additions, deductions: salaryInfo.deductions, salaryBeforeAdjustments: salaryInfo.salaryBeforeAdjustments, salary: salaryInfo.salary, days: empRecords.length, abnormalCount: empRecords.filter((r) => r.attendanceStatus && r.attendanceStatus !== "normal").length, adjustments: empAdjustments };
+  });
+  const totalPayroll = rows.reduce((sum, row) => sum + Number(row.salary || 0), 0);
+  const totalAdditions = rows.reduce((sum, row) => sum + Number(row.additions || 0), 0);
+  const totalDeductions = rows.reduce((sum, row) => sum + Number(row.deductions || 0), 0);
+  const departmentPayrollRows = Object.values(rows.reduce((acc, row) => {
+    const department = row.department?.split("、")?.[0] || "未設定";
+    if (!acc[department]) acc[department] = { department, employeeCount: 0, totalHours: 0, basePay: 0, overtimePay: 0, additions: 0, deductions: 0, salary: 0 };
+    acc[department].employeeCount += 1;
+    acc[department].totalHours = Math.round((acc[department].totalHours + Number(row.hours || 0)) * 100) / 100;
+    acc[department].basePay += Number(row.basePay || 0);
+    acc[department].overtimePay += Number(row.overtimePay || 0);
+    acc[department].additions += Number(row.additions || 0);
+    acc[department].deductions += Number(row.deductions || 0);
+    acc[department].salary += Number(row.salary || 0);
+    return acc;
+  }, {}));
+  return <Card title="薪資單" subtitle="可自訂薪資加項與扣項，例如：獎金、請假扣費、餐費、借支等。"><div className="mb-4 grid gap-3 md:grid-cols-4"><Input label="月份" type="month" value={month} onChange={setMonth} /><InfoBox label="總加項" value={`$${totalAdditions.toLocaleString()}`} /><InfoBox label="總扣項" value={`$${totalDeductions.toLocaleString()}`} /><InfoBox label="應發薪資合計" value={`$${totalPayroll.toLocaleString()}`} /></div><div className="mb-5 rounded-3xl border border-neutral-200 bg-white p-4"><div className="mb-3"><h3 className="font-bold">各部門薪資統計</h3><p className="mt-1 text-xs text-neutral-500">依員工主要部門即時計算，調整加項或扣項後會同步更新。</p></div>{departmentPayrollRows.length === 0 ? <div className="rounded-2xl bg-neutral-50 p-3 text-sm text-neutral-500">目前沒有薪資資料</div> : <div className="overflow-x-auto"><table className="w-full min-w-[920px] border-separate border-spacing-y-2 text-sm"><thead className="text-left text-neutral-500"><tr><th className="px-3 py-2">部門</th><th className="px-3 py-2">人數</th><th className="px-3 py-2">總工時</th><th className="px-3 py-2">基本薪資</th><th className="px-3 py-2">加班費</th><th className="px-3 py-2">增加費用</th><th className="px-3 py-2">扣除費用</th><th className="px-3 py-2">應發薪資</th></tr></thead><tbody>{departmentPayrollRows.map((row) => <tr key={row.department} className="bg-neutral-100"><td className="rounded-l-2xl px-3 py-3 font-bold">{row.department}</td><td className="px-3 py-3">{row.employeeCount}</td><td className="px-3 py-3">{row.totalHours}</td><td className="px-3 py-3">${row.basePay.toLocaleString()}</td><td className="px-3 py-3">${row.overtimePay.toLocaleString()}</td><td className="px-3 py-3 text-green-700">${row.additions.toLocaleString()}</td><td className="px-3 py-3 text-red-700">${row.deductions.toLocaleString()}</td><td className="rounded-r-2xl px-3 py-3 font-bold">${row.salary.toLocaleString()}</td></tr>)}</tbody></table></div>}</div><div className="mb-5 rounded-3xl border border-neutral-200 bg-neutral-50 p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="font-bold">薪資調整項</h3><p className="mt-1 text-xs text-neutral-500">加項會增加應發薪資，扣項會扣除應發薪資。</p></div><button type="button" onClick={() => setCreatingAdjustment(!creatingAdjustment)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingAdjustment ? "收合" : "新增調整項"}</button></div>{creatingAdjustment && <form onSubmit={createPayrollAdjustment} className="grid gap-3 md:grid-cols-6"><Select label="員工" value={adjustmentForm.employeeId} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, employeeId: v })}>{employees.filter((emp) => emp.role !== "owner").map((emp) => <option key={emp.id} value={emp.lineUserId || emp.id}>{emp.name || emp.displayName}</option>)}</Select><Select label="類型" value={adjustmentForm.type} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, type: v, title: v === "addition" ? "獎金" : "請假扣費" })}><option value="addition">增加費用</option><option value="deduction">扣除費用</option></Select><Input label="項目名稱" value={adjustmentForm.title} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, title: v })} /><Input label="金額" type="number" value={String(adjustmentForm.amount)} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, amount: Number(v || 0) })} /><Input label="備註" value={adjustmentForm.note} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white">新增</button></form>}</div><div className="space-y-4">{rows.map((row) => <div key={row.id} className="rounded-3xl border bg-white p-4"><div className="grid gap-3 md:grid-cols-[1.5fr_1fr_1fr_1fr_1fr] md:items-center"><div><div className="font-bold">{row.name}</div><div className="text-xs text-neutral-500">{row.department}｜{row.employeeType === "fullTime" ? "正職" : "時薪"}</div></div><InfoBox label="總工時" value={`${row.hours} 小時`} /><InfoBox label="基本薪資" value={`$${Number(row.basePay || 0).toLocaleString()}`} /><InfoBox label="加班費" value={`$${Number(row.overtimePay || 0).toLocaleString()}`} /><InfoBox label="應發薪資" value={`$${Number(row.salary || 0).toLocaleString()}`} /></div><div className="mt-4 grid gap-3 md:grid-cols-5"><div className="rounded-2xl bg-neutral-100 p-3 text-sm"><div className="text-neutral-500">出勤天數</div><div className="font-bold">{row.days}</div></div><div className="rounded-2xl bg-neutral-100 p-3 text-sm"><div className="text-neutral-500">異常</div><div className="font-bold">{row.abnormalCount}</div></div><div className="rounded-2xl bg-neutral-100 p-3 text-sm"><div className="text-neutral-500">加班時數</div><div className="font-bold">{row.overtimeHours || 0}</div></div><div className="rounded-2xl bg-green-50 p-3 text-sm text-green-700"><div>增加費用</div><div className="font-bold">${Number(row.additions || 0).toLocaleString()}</div></div><div className="rounded-2xl bg-red-50 p-3 text-sm text-red-700"><div>扣除費用</div><div className="font-bold">${Number(row.deductions || 0).toLocaleString()}</div></div></div><div className="mt-4"><div className="mb-2 text-sm font-bold text-neutral-700">調整明細</div>{row.adjustments.length === 0 ? <div className="rounded-2xl bg-neutral-50 p-3 text-sm text-neutral-500">尚無加扣項</div> : <div className="space-y-2">{row.adjustments.map((item) => <div key={item.id} className={`flex items-center justify-between rounded-2xl p-3 text-sm ${item.type === "addition" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}><div><div className="font-bold">{item.type === "addition" ? "+" : "-"} ${Number(item.amount || 0).toLocaleString()}｜{item.title}</div>{item.note && <div className="text-xs opacity-80">{item.note}</div>}</div><button onClick={() => deletePayrollAdjustment(item)} className="rounded-xl bg-white px-3 py-2 font-bold text-neutral-700">刪除</button></div>)}</div>}</div></div>)}</div></Card>;
 }
 
 function RecordTable({ records }) {
