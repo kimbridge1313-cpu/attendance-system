@@ -726,8 +726,8 @@ function ErrorPage({ message, onRetry }) {
 function TabButton({ active, onClick, children }) {
   return <button onClick={onClick} className={`rounded-2xl px-4 py-3 text-sm font-semibold shadow-sm transition ${active ? "bg-neutral-900 text-white" : "bg-white text-neutral-700"}`}>{children}</button>;
 }
-function Card({ title, subtitle, children }) {
-  return <section className="rounded-3xl bg-white p-5 shadow-sm"><div className="mb-4"><h2 className="text-lg font-bold">{title}</h2>{subtitle && <p className="mt-1 text-sm text-neutral-500">{subtitle}</p>}</div>{children}</section>;
+function Card({ title, subtitle, children, compact = false }) {
+  return <section className={`rounded-3xl bg-white shadow-sm ${compact ? "p-4" : "p-5"}`}><div className={compact ? "mb-2" : "mb-4"}><h2 className={compact ? "text-base font-bold" : "text-lg font-bold"}>{title}</h2>{subtitle && <p className={`mt-1 text-neutral-500 ${compact ? "text-xs" : "text-sm"}`}>{subtitle}</p>}</div>{children}</section>;
 }
 function Input({ label, value, onChange, type = "text" }) {
   return <label className="block min-w-0"><span className="mb-1 block text-sm font-medium text-neutral-700">{label}</span><input type={type} value={value} onChange={(e) => onChange(e.target.value)} className="box-border h-12 w-full min-w-0 max-w-full appearance-none rounded-2xl border border-neutral-200 bg-white px-4 text-base leading-none outline-none focus:border-neutral-900" style={{ WebkitAppearance: "none" }} /></label>;
@@ -759,7 +759,23 @@ function ClockPanel({ employee, todayRecord, todaySchedule, onClockIn, onClockOu
   const canClockIn = !todayRecord;
   const canClockOut = todayRecord && !todayRecord.clockOut;
   const isCompleted = todayRecord?.clockIn && todayRecord?.clockOut;
-  return <div className="space-y-5"><Card title="今日班表" subtitle={`今天日期：${todayString()}`}>{todaySchedule ? <div className="grid gap-4 md:grid-cols-4"><InfoBox label="部門" value={todaySchedule.department || employee.department || "未設定"} /><InfoBox label="上班時間" value={todaySchedule.startTime} /><InfoBox label="下班時間" value={todaySchedule.endTime} /><InfoBox label="寬限分鐘" value={`${todaySchedule.graceMinutes ?? DEFAULT_GRACE_MINUTES} 分`} /></div> : <div className="rounded-2xl bg-amber-50 p-4 text-sm text-amber-900">今天尚未排班。若仍打卡，系統會標記為「無排班打卡」。</div>}</Card><Card title="今日打卡"><div className="grid gap-4 md:grid-cols-4"><InfoBox label="上班打卡" value={todayRecord?.clockIn || "尚未打卡"} /><InfoBox label="下班打卡" value={todayRecord?.clockOut || "尚未打卡"} /><InfoBox label="今日工時" value={isCompleted ? `${todayRecord.workHours || 0} 小時` : "尚未完成"} /><InfoBox label="狀態" value={todayRecord ? getAttendanceStatusText(todayRecord.attendanceStatus) : "尚未打卡"} /></div>{todayRecord && todayRecord.attendanceStatus !== "normal" && <div className="mt-4 rounded-2xl bg-red-50 p-4 text-sm text-red-700">{getAttendanceStatusText(todayRecord.attendanceStatus)}{todayRecord.lateMinutes > 0 ? `｜遲到 ${todayRecord.lateMinutes} 分` : ""}{todayRecord.earlyLeaveMinutes > 0 ? `｜早退 ${todayRecord.earlyLeaveMinutes} 分` : ""}</div>}<div className="mt-5 grid gap-3 md:grid-cols-2"><button disabled={!canClockIn} onClick={onClockIn} className="rounded-2xl bg-neutral-900 px-4 py-4 font-bold text-white disabled:bg-neutral-300">上班打卡</button><button disabled={!canClockOut} onClick={onClockOut} className="rounded-2xl bg-neutral-900 px-4 py-4 font-bold text-white disabled:bg-neutral-300">下班打卡</button></div><button onClick={onReload} className="mt-3 text-sm text-neutral-500 underline">重新整理今日狀態</button></Card></div>;
+
+  return <div className="space-y-4">
+    <Card compact title="今日班表" subtitle={`今天日期：${todayString()}`}>
+      {todaySchedule ? <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-neutral-50 px-3 py-2 text-sm">
+        <div className="font-bold">{todaySchedule.department || employee.department || "未設定"}</div>
+        <div className="font-medium">{todaySchedule.startTime} - {todaySchedule.endTime}</div>
+        <div className="text-xs text-neutral-500">寬限 {todaySchedule.graceMinutes ?? DEFAULT_GRACE_MINUTES} 分</div>
+      </div> : <div className="rounded-2xl bg-amber-50 px-3 py-2 text-xs text-amber-900">今天尚未排班。若仍打卡，系統會標記為「無排班打卡」。</div>}
+    </Card>
+
+    <Card title="今日打卡">
+      <div className="grid gap-4 md:grid-cols-4"><InfoBox label="上班打卡" value={todayRecord?.clockIn || "尚未打卡"} /><InfoBox label="下班打卡" value={todayRecord?.clockOut || "尚未打卡"} /><InfoBox label="今日工時" value={isCompleted ? `${todayRecord.workHours || 0} 小時` : "尚未完成"} /><InfoBox label="狀態" value={todayRecord ? getAttendanceStatusText(todayRecord.attendanceStatus) : "尚未打卡"} /></div>
+      {todayRecord && todayRecord.attendanceStatus !== "normal" && <div className="mt-4 rounded-2xl bg-red-50 p-4 text-sm text-red-700">{getAttendanceStatusText(todayRecord.attendanceStatus)}{todayRecord.lateMinutes > 0 ? `｜遲到 ${todayRecord.lateMinutes} 分` : ""}{todayRecord.earlyLeaveMinutes > 0 ? `｜早退 ${todayRecord.earlyLeaveMinutes} 分` : ""}</div>}
+      <div className="mt-5 grid gap-3 md:grid-cols-2"><button disabled={!canClockIn} onClick={onClockIn} className="rounded-2xl bg-neutral-900 px-4 py-4 font-bold text-white disabled:bg-neutral-300">上班打卡</button><button disabled={!canClockOut} onClick={onClockOut} className="rounded-2xl bg-neutral-900 px-4 py-4 font-bold text-white disabled:bg-neutral-300">下班打卡</button></div>
+      <button onClick={onReload} className="mt-3 text-sm text-neutral-500 underline">重新整理今日狀態</button>
+    </Card>
+  </div>;
 }
 
 function CorrectionPanel({ employee, profile, setGlobalError }) {
