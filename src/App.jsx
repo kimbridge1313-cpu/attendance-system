@@ -420,8 +420,8 @@ function App() {
   const [error, setError] = useState("");
   const [profile, setProfile] = useState(null);
   const [employee, setEmployee] = useState(null);
-  const [todayRecord, setTodayRecord] = useState(null);
-  const [todaySchedule, setTodaySchedule] = useState(null);
+  const [todayRecords, setTodayRecords] = useState([]);
+  const [todaySchedules, setTodaySchedules] = useState([]);
   const [activeTab, setActiveTab] = useState("clock");
   const [companyLocations, setCompanyLocations] = useState(DEFAULT_COMPANY_LOCATIONS);
 
@@ -501,7 +501,7 @@ function App() {
     if (employeeSnap?.exists()) {
       const employeeData = { id: employeeSnap.id, ...employeeSnap.data() };
       setEmployee(employeeData);
-      await Promise.all([loadTodayRecord(lineProfile.userId), loadTodaySchedule(lineProfile.userId)]);
+      await Promise.all([loadTodayRecords(lineProfile.userId), loadTodaySchedules(lineProfile.userId)]);
       setLoading(false);
       return;
     }
@@ -544,18 +544,18 @@ function App() {
     }
   }
 
-  async function loadTodayRecord(userId) {
+  async function loadTodayRecords(userId) {
     const date = todayString();
-    const snap = await safeRun(() => getDocs(query(collection(db, "attendanceRecords"), where("employeeId", "==", userId), where("date", "==", date), limit(10))), "讀取今日打卡失敗。", setError);
+    const snap = await safeRun(() => getDocs(query(collection(db, "attendanceRecords"), where("employeeId", "==", userId), where("date", "==", date), limit(50))), "讀取今日打卡失敗。", setError);
     if (!snap) return;
-    setTodayRecord(sortByCreatedAtDesc(snap.docs.map((item) => ({ id: item.id, ...item.data() })))[0] || null);
+    setTodayRecords(sortByCreatedAtDesc(snap.docs.map((item) => ({ id: item.id, ...item.data() }))));
   }
 
-  async function loadTodaySchedule(userId) {
+  async function loadTodaySchedules(userId) {
     const date = todayString();
-    const snap = await safeRun(() => getDocs(query(collection(db, "schedules"), where("employeeId", "==", userId), where("date", "==", date), limit(10))), "讀取今日班表失敗。", setError);
+    const snap = await safeRun(() => getDocs(query(collection(db, "schedules"), where("employeeId", "==", userId), where("date", "==", date), limit(50))), "讀取今日班表失敗。", setError);
     if (!snap) return;
-    setTodaySchedule(sortByFieldAsc(snap.docs.map((item) => ({ id: item.id, ...item.data() })), "startTime")[0] || null);
+    setTodaySchedules(sortByFieldAsc(snap.docs.map((item) => ({ id: item.id, ...item.data() })), "startTime"));
   }
 
   async function applyJoin(form) {
@@ -582,7 +582,7 @@ function App() {
     if (ok !== null) setEmployee({ id: profile.userId, ...data });
   }
 
-  async function clockIn() {
+  async function clockIn(selectedSchedule = null, selectedDepartment = "") {
     if (!profile || !employee) return;
     try {
       const position = await getClockPosition(companyLocations);
@@ -597,16 +597,17 @@ function App() {
 
       const date = todayString();
       const time = currentTimeString();
-      const check = evaluateAttendance({ schedule: todaySchedule, clockIn: time, clockOut: "" });
+      const check = evaluateAttendance({ schedule: selectedSchedule, clockIn: time, clockOut: "" });
+      const department = selectedSchedule?.department || selectedDepartment || employee.department || matchedLocation.name || "未設定";
       const data = {
         employeeId: profile.userId,
         employeeName: employee.name || profile.displayName,
-        department: todaySchedule?.department || employee.department || matchedLocation.name || "未設定",
+        department,
         date,
         month: date.slice(0, 7),
-        scheduleId: todaySchedule?.id || null,
-        scheduledStart: todaySchedule?.startTime || "",
-        scheduledEnd: todaySchedule?.endTime || "",
+        scheduleId: selectedSchedule?.id || null,
+        scheduledStart: selectedSchedule?.startTime || "",
+        scheduledEnd: selectedSchedule?.endTime || "",
         clockIn: time,
         clockOut: "",
         clockInAt: serverTimestamp(),
@@ -626,7 +627,7 @@ function App() {
         updatedAt: serverTimestamp(),
       };
       const ref = await safeRun(() => addDoc(collection(db, "attendanceRecords"), data), "上班打卡失敗。", setError);
-      if (ref) setTodayRecord({ id: ref.id, ...data });
+      if (ref) setTodayRecords((prev) => [{ id: ref.id, ...data }, ...prev]);
     } catch (err) {
       const message = err?.message || "定位失敗，請開啟手機定位權限後再打卡。";
       alert(message);
@@ -634,8 +635,8 @@ function App() {
     }
   }
 
-  async function clockOut() {
-    if (!todayRecord?.id) return;
+  async function clockOut(record, selectedSchedule = null) {
+    if (!record?.id) return;
     try {
       const position = await getClockPosition(companyLocations);
       const latitude = position.coords.latitude;
@@ -647,9 +648,10 @@ function App() {
         return;
       }
 
+      const scheduleForRecord = selectedSchedule || todaySchedules.find((schedule) => schedule.id === record.scheduleId) || null;
       const time = currentTimeString();
-      const workMinutes = minutesBetween(todayRecord.clockIn, time);
-      const check = evaluateAttendance({ schedule: todaySchedule, clockIn: todayRecord.clockIn, clockOut: time });
+      const workMinutes = minutesBetween(record.clockIn, time);
+      const check = evaluateAttendance({ schedule: scheduleForRecord, clockIn: record.clockIn, clockOut: time });
       const updateData = {
         clockOut: time,
         clockOutAt: serverTimestamp(),
@@ -665,8 +667,8 @@ function App() {
         clockOutLongitude: longitude,
         updatedAt: serverTimestamp(),
       };
-      const ok = await safeRun(() => updateDoc(doc(db, "attendanceRecords", todayRecord.id), updateData), "下班打卡失敗。", setError);
-      if (ok !== null) setTodayRecord({ ...todayRecord, ...updateData });
+      const ok = await safeRun(() => updateDoc(doc(db, "attendanceRecords", record.id), updateData), "下班打卡失敗。", setError);
+      if (ok !== null) setTodayRecords((prev) => prev.map((item) => item.id === record.id ? { ...item, ...updateData } : item));
     } catch (err) {
       const message = err?.message || "定位失敗，請開啟手機定位權限後再打卡。";
       alert(message);
@@ -706,7 +708,7 @@ function App() {
           {isManager && <TabButton active={activeTab === "schedule"} onClick={() => setActiveTab("schedule")}>排班</TabButton>}
           {isManager && <TabButton active={activeTab === "salary"} onClick={() => setActiveTab("salary")}>薪資單</TabButton>}
         </nav>
-        {activeTab === "clock" && <ClockPanel employee={employee} todayRecord={todayRecord} todaySchedule={todaySchedule} onClockIn={clockIn} onClockOut={clockOut} onReload={() => Promise.all([loadTodayRecord(profile.userId), loadTodaySchedule(profile.userId)])} />}
+        {activeTab === "clock" && <ClockPanel employee={employee} todayRecords={todayRecords} todaySchedules={todaySchedules} onClockIn={clockIn} onClockOut={clockOut} onReload={() => Promise.all([loadTodayRecords(profile.userId), loadTodaySchedules(profile.userId)])} />}
         {activeTab === "correction" && <CorrectionPanel employee={employee} profile={profile} setGlobalError={setError} />}
         {activeTab === "myStats" && <MyStatsPanel employee={employee} setGlobalError={setError} />}
         {activeTab === "admin" && isManager && <AdminPanel currentUser={employee} setGlobalError={setError} companyLocations={companyLocations} setCompanyLocations={setCompanyLocations} />}
@@ -755,25 +757,59 @@ function JoinPage({ profile, onSubmit, error }) {
   return <div className="min-h-screen bg-neutral-100 p-4"><div className="mx-auto max-w-md rounded-3xl bg-white p-6 shadow"><h1 className="text-xl font-bold">申請加入員工系統</h1><p className="mt-2 text-sm text-neutral-500">第一次使用需要主管審核後才能打卡。</p>{error && <div className="mt-4 whitespace-pre-line rounded-2xl bg-red-50 p-3 text-sm text-red-700">{error}</div>}<form onSubmit={submit} className="mt-5 space-y-4"><Input label="員工姓名" value={form.name} onChange={(v) => setForm({ ...form, name: v })} /><Select label="部門" value={form.department} onChange={(v) => setForm({ ...form, department: v })}>{DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}</Select><Input label="電話" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} /><Input label="備註" value={form.note} onChange={(v) => setForm({ ...form, note: v })} /><button disabled={saving} className="w-full rounded-2xl bg-neutral-900 px-4 py-3 font-bold text-white disabled:opacity-50">{saving ? "送出中..." : "送出申請"}</button></form></div></div>;
 }
 
-function ClockPanel({ employee, todayRecord, todaySchedule, onClockIn, onClockOut, onReload }) {
-  const canClockIn = !todayRecord;
-  const canClockOut = todayRecord && !todayRecord.clockOut;
-  const isCompleted = todayRecord?.clockIn && todayRecord?.clockOut;
+function ClockPanel({ employee, todayRecords, todaySchedules, onClockIn, onClockOut, onReload }) {
+  const employeeDepartments = getEmployeeDepartments(employee);
+  const [selectedScheduleId, setSelectedScheduleId] = useState("");
+  const [selectedDepartment, setSelectedDepartment] = useState(employeeDepartments[0] || "烘焙坊");
+
+  const openRecords = todayRecords.filter((record) => !record.clockOut);
+  const selectedSchedule = todaySchedules.find((schedule) => schedule.id === selectedScheduleId) || todaySchedules[0] || null;
+  const activeRecord = selectedSchedule ? openRecords.find((record) => record.scheduleId === selectedSchedule.id) || null : openRecords[0] || null;
+  const clockDepartment = selectedSchedule?.department || selectedDepartment;
 
   return <div className="space-y-4">
-    <Card compact title="今日班表" subtitle={`今天日期：${todayString()}`}>
-      {todaySchedule ? <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-neutral-50 px-3 py-2 text-sm">
-        <div className="font-bold">{todaySchedule.department || employee.department || "未設定"}</div>
-        <div className="font-medium">{todaySchedule.startTime} - {todaySchedule.endTime}</div>
-        {(todaySchedule.graceMinutes ?? DEFAULT_GRACE_MINUTES) !== 30 && <div className="text-xs text-neutral-500">寬限 {todaySchedule.graceMinutes ?? DEFAULT_GRACE_MINUTES} 分</div>}
-      </div> : <div className="rounded-2xl bg-amber-50 px-3 py-2 text-xs text-amber-900">今天尚未排班。若仍打卡，系統會標記為「無排班打卡」。</div>}
-    </Card>
+    <section className="rounded-3xl bg-red-600 p-4 text-white shadow-sm">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-base font-bold">今日班表</h2>
+          <p className="mt-1 text-xs text-red-100">{todayString()}</p>
+        </div>
+        <button onClick={onReload} className="rounded-2xl bg-white/15 px-3 py-2 text-xs font-bold text-white">重新整理</button>
+      </div>
 
-    <Card title="今日打卡">
-      <div className="grid gap-4 md:grid-cols-4"><InfoBox label="上班打卡" value={todayRecord?.clockIn || "尚未打卡"} /><InfoBox label="下班打卡" value={todayRecord?.clockOut || "尚未打卡"} /><InfoBox label="今日工時" value={isCompleted ? `${todayRecord.workHours || 0} 小時` : "尚未完成"} /><InfoBox label="狀態" value={todayRecord ? getAttendanceStatusText(todayRecord.attendanceStatus) : "尚未打卡"} /></div>
-      {todayRecord && todayRecord.attendanceStatus !== "normal" && <div className="mt-4 rounded-2xl bg-red-50 p-4 text-sm text-red-700">{getAttendanceStatusText(todayRecord.attendanceStatus)}{todayRecord.lateMinutes > 0 ? `｜遲到 ${todayRecord.lateMinutes} 分` : ""}{todayRecord.earlyLeaveMinutes > 0 ? `｜早退 ${todayRecord.earlyLeaveMinutes} 分` : ""}</div>}
-      <div className="mt-5 grid gap-3 md:grid-cols-2"><button disabled={!canClockIn} onClick={onClockIn} className="rounded-2xl bg-neutral-900 px-4 py-4 font-bold text-white disabled:bg-neutral-300">上班打卡</button><button disabled={!canClockOut} onClick={onClockOut} className="rounded-2xl bg-neutral-900 px-4 py-4 font-bold text-white disabled:bg-neutral-300">下班打卡</button></div>
-      <button onClick={onReload} className="mt-3 text-sm text-neutral-500 underline">重新整理今日狀態</button>
+      {todaySchedules.length > 0 ? <div className="space-y-3">
+        <Select label="選擇今日班次" value={selectedSchedule?.id || ""} onChange={setSelectedScheduleId}>
+          {todaySchedules.map((schedule) => <option key={schedule.id} value={schedule.id}>{schedule.department}｜{schedule.startTime}-{schedule.endTime}</option>)}
+        </Select>
+        <div className="rounded-2xl bg-white/15 px-3 py-2 text-sm">
+          <div className="font-bold">{selectedSchedule?.department || employee.department || "未設定"}</div>
+          <div>{selectedSchedule?.startTime || "--:--"} - {selectedSchedule?.endTime || "--:--"}</div>
+        </div>
+      </div> : <div className="space-y-3">
+        <div className="rounded-2xl bg-white/15 px-3 py-2 text-xs">今天尚未排班。若仍打卡，系統會標記為「無排班打卡」。</div>
+        {employeeDepartments.length > 1 && <Select label="選擇上班部門" value={selectedDepartment} onChange={setSelectedDepartment}>{employeeDepartments.map((department) => <option key={department} value={department}>{department}</option>)}</Select>}
+      </div>}
+
+      <div className="mt-4 grid gap-3">
+        {!activeRecord ? <button onClick={() => onClockIn(selectedSchedule, clockDepartment)} className="rounded-2xl bg-white px-4 py-4 text-lg font-black text-red-600 shadow-sm">上班打卡</button> : <button onClick={() => onClockOut(activeRecord, selectedSchedule)} className="rounded-2xl bg-white px-4 py-4 text-lg font-black text-red-600 shadow-sm">下班打卡</button>}
+        {activeRecord && <div className="text-center text-xs text-red-100">目前進行中：{activeRecord.clockIn} 上班｜{activeRecord.department}</div>}
+      </div>
+    </section>
+
+    <Card title="今日紀錄" subtitle="打卡後會出現在這裡，可支援一天多時段。">
+      {todayRecords.length === 0 ? <div className="rounded-2xl bg-neutral-100 p-4 text-sm text-neutral-500">今天尚無打卡紀錄</div> : <div className="space-y-3">{todayRecords.map((record) => <div key={record.id} className="rounded-2xl border p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="font-bold">{record.department || "未設定部門"}</div>
+            <div className="text-sm text-neutral-500">{record.clockIn || "-"} - {record.clockOut || "尚未下班"}</div>
+          </div>
+          <div className="text-right text-sm">
+            <div className="font-bold">{record.clockOut ? `${record.workHours || 0} 小時` : "進行中"}</div>
+            <div className="text-xs text-neutral-500">{getAttendanceStatusText(record.attendanceStatus)}</div>
+          </div>
+        </div>
+        {record.attendanceStatus && record.attendanceStatus !== "normal" && <div className="mt-3 rounded-xl bg-red-50 p-2 text-xs text-red-700">{getAttendanceStatusText(record.attendanceStatus)}{record.lateMinutes > 0 ? `｜遲到 ${record.lateMinutes} 分` : ""}{record.earlyLeaveMinutes > 0 ? `｜早退 ${record.earlyLeaveMinutes} 分` : ""}</div>}
+      </div>)}</div>}
     </Card>
   </div>;
 }
