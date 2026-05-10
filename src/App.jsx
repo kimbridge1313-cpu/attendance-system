@@ -678,10 +678,10 @@ function Card({ title, subtitle, children }) {
   return <section className="rounded-3xl bg-white p-5 shadow-sm"><div className="mb-4"><h2 className="text-lg font-bold">{title}</h2>{subtitle && <p className="mt-1 text-sm text-neutral-500">{subtitle}</p>}</div>{children}</section>;
 }
 function Input({ label, value, onChange, type = "text" }) {
-  return <label className="block"><span className="mb-1 block text-sm font-medium text-neutral-700">{label}</span><input type={type} value={value} onChange={(e) => onChange(e.target.value)} className="w-full rounded-2xl border border-neutral-200 px-4 py-3 outline-none focus:border-neutral-900" /></label>;
+  return <label className="block min-w-0"><span className="mb-1 block text-sm font-medium text-neutral-700">{label}</span><input type={type} value={value} onChange={(e) => onChange(e.target.value)} className="box-border h-12 w-full min-w-0 max-w-full appearance-none rounded-2xl border border-neutral-200 bg-white px-4 text-base leading-none outline-none focus:border-neutral-900" style={{ WebkitAppearance: "none" }} /></label>;
 }
 function Select({ label, value, onChange, children }) {
-  return <label className="block"><span className="mb-1 block text-sm font-medium text-neutral-700">{label}</span><select value={value} onChange={(e) => onChange(e.target.value)} className="w-full rounded-2xl border border-neutral-200 px-4 py-3 outline-none focus:border-neutral-900">{children}</select></label>;
+  return <label className="block min-w-0"><span className="mb-1 block text-sm font-medium text-neutral-700">{label}</span><select value={value} onChange={(e) => onChange(e.target.value)} className="box-border h-12 w-full min-w-0 max-w-full appearance-none rounded-2xl border border-neutral-200 bg-white px-4 text-base leading-none outline-none focus:border-neutral-900" style={{ WebkitAppearance: "none" }}>{children}</select></label>;
 }
 function InfoBox({ label, value }) {
   return <div className="rounded-2xl bg-neutral-100 p-4"><div className="text-sm text-neutral-500">{label}</div><div className="mt-1 text-xl font-bold">{value}</div></div>;
