@@ -765,7 +765,7 @@ function ClockPanel({ employee, todayRecord, todaySchedule, onClockIn, onClockOu
       {todaySchedule ? <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-neutral-50 px-3 py-2 text-sm">
         <div className="font-bold">{todaySchedule.department || employee.department || "未設定"}</div>
         <div className="font-medium">{todaySchedule.startTime} - {todaySchedule.endTime}</div>
-        <div className="text-xs text-neutral-500">寬限 {todaySchedule.graceMinutes ?? DEFAULT_GRACE_MINUTES} 分</div>
+        {(todaySchedule.graceMinutes ?? DEFAULT_GRACE_MINUTES) !== 30 && <div className="text-xs text-neutral-500">寬限 {todaySchedule.graceMinutes ?? DEFAULT_GRACE_MINUTES} 分</div>}
       </div> : <div className="rounded-2xl bg-amber-50 px-3 py-2 text-xs text-amber-900">今天尚未排班。若仍打卡，系統會標記為「無排班打卡」。</div>}
     </Card>
 
