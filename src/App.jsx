@@ -915,14 +915,40 @@ function CorrectionPanel({ employee, profile, setGlobalError }) {
 function MyStatsPanel({ employee, setGlobalError }) {
   const [month, setMonth] = useState(getMonthString());
   const [records, setRecords] = useState([]);
+
   useEffect(() => { load(); }, [month]);
+
   async function load() {
-    const snap = await safeRun(() => getDocs(query(collection(db, "attendanceRecords"), where("employeeId", "==", employee.lineUserId), where("month", "==", month))), "讀取月統計失敗。", setGlobalError);
+    const snap = await safeRun(
+      () => getDocs(query(collection(db, "attendanceRecords"), where("employeeId", "==", employee.lineUserId), where("month", "==", month))),
+      "讀取月出勤紀錄失敗。",
+      setGlobalError
+    );
     if (snap) setRecords(sortByFieldAsc(snap.docs.map((d) => ({ id: d.id, ...d.data() })), "date"));
   }
-  const totalMinutes = records.reduce((sum, r) => sum + Number(r.workMinutes || 0), 0);
-  const salary = formatHours(totalMinutes) * Number(employee.hourlyWage || 0);
-  return <Card title="我的月統計"><div className="mb-4 max-w-xs"><Input label="月份" type="month" value={month} onChange={setMonth} /></div><div className="grid gap-4 md:grid-cols-3"><InfoBox label="總分鐘" value={`${totalMinutes} 分`} /><InfoBox label="總工時" value={`${formatHours(totalMinutes)} 小時`} /><InfoBox label="預估薪資" value={`$${Math.round(salary).toLocaleString()}`} /></div><RecordTable records={records} /></Card>;
+
+  return <Card title="我的出勤紀錄" subtitle="僅供核對上下班時間，如需修改請送出補卡申請。">
+    <div className="mb-4 max-w-xs"><Input label="月份" type="month" value={month} onChange={setMonth} /></div>
+    {records.length === 0 ? <div className="rounded-2xl bg-neutral-100 p-4 text-sm text-neutral-500">目前沒有出勤紀錄</div> : <div className="space-y-3">{records.map((record) => <div key={record.id} className="rounded-2xl border bg-white p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="font-bold">{record.date}</div>
+          <div className="mt-1 text-sm text-neutral-500">{record.department || "未設定部門"}</div>
+        </div>
+        <span className={`rounded-full px-3 py-1 text-xs font-bold ${record.attendanceStatus === "normal" ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"}`}>{getAttendanceStatusText(record.attendanceStatus)}</span>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+        <div className="rounded-2xl bg-neutral-50 p-3">
+          <div className="text-xs text-neutral-500">班表</div>
+          <div className="mt-1 font-bold">{record.scheduledStart || "-"} - {record.scheduledEnd || "-"}</div>
+        </div>
+        <div className="rounded-2xl bg-neutral-50 p-3">
+          <div className="text-xs text-neutral-500">實際</div>
+          <div className="mt-1 font-bold">{record.clockIn || "-"} - {record.clockOut || "尚未下班"}</div>
+        </div>
+      </div>
+    </div>)}</div>}
+  </Card>;
 }
 
 function EmployeeSchedulePanel({ employee, setGlobalError }) {
