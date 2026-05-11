@@ -767,32 +767,55 @@ function ClockPanel({ employee, todayRecords, todaySchedules, onClockIn, onClock
   const activeRecord = selectedSchedule ? openRecords.find((record) => record.scheduleId === selectedSchedule.id) || null : openRecords[0] || null;
   const clockDepartment = selectedSchedule?.department || selectedDepartment;
 
+  const scheduleOptions = todaySchedules.length > 0 ? todaySchedules : [];
+
   return <div className="space-y-4">
-    <section className="rounded-3xl bg-red-600 p-4 text-white shadow-sm">
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <div>
-          <h2 className="text-base font-bold">今日班表</h2>
-          <p className="mt-1 text-xs text-red-100">{todayString()}</p>
+    <section className="overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-black/5">
+      <div className="bg-gradient-to-r from-neutral-950 to-neutral-800 px-4 py-4 text-white">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-xs font-bold tracking-widest text-neutral-300">TODAY SHIFT</div>
+            <h2 className="mt-1 text-xl font-black">今日打卡</h2>
+            <p className="mt-1 text-xs text-neutral-300">{todayString()}</p>
+          </div>
+          <button onClick={onReload} className="rounded-2xl bg-white/10 px-3 py-2 text-xs font-bold text-white">重新整理</button>
         </div>
-        <button onClick={onReload} className="rounded-2xl bg-white/15 px-3 py-2 text-xs font-bold text-white">重新整理</button>
       </div>
 
-      {todaySchedules.length > 0 ? <div className="space-y-3">
-        <Select label="選擇今日班次" value={selectedSchedule?.id || ""} onChange={setSelectedScheduleId}>
-          {todaySchedules.map((schedule) => <option key={schedule.id} value={schedule.id}>{schedule.department}｜{schedule.startTime}-{schedule.endTime}</option>)}
-        </Select>
-        <div className="rounded-2xl bg-white/15 px-3 py-2 text-sm">
-          <div className="font-bold">{selectedSchedule?.department || employee.department || "未設定"}</div>
-          <div>{selectedSchedule?.startTime || "--:--"} - {selectedSchedule?.endTime || "--:--"}</div>
-        </div>
-      </div> : <div className="space-y-3">
-        <div className="rounded-2xl bg-white/15 px-3 py-2 text-xs">今天尚未排班。若仍打卡，系統會標記為「無排班打卡」。</div>
-        {employeeDepartments.length > 1 && <Select label="選擇上班部門" value={selectedDepartment} onChange={setSelectedDepartment}>{employeeDepartments.map((department) => <option key={department} value={department}>{department}</option>)}</Select>}
-      </div>}
+      <div className="space-y-4 p-4">
+        {scheduleOptions.length > 0 ? <div>
+          <div className="mb-2 text-sm font-bold text-neutral-700">選擇今日班次</div>
+          <div className="grid gap-2">
+            {scheduleOptions.map((schedule) => {
+              const selected = selectedSchedule?.id === schedule.id;
+              const relatedOpenRecord = openRecords.find((record) => record.scheduleId === schedule.id);
+              return <button key={schedule.id} type="button" onClick={() => setSelectedScheduleId(schedule.id)} className={`rounded-2xl border px-4 py-3 text-left transition ${selected ? "border-neutral-900 bg-neutral-900 text-white" : "border-neutral-200 bg-neutral-50 text-neutral-800"}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="font-black">{schedule.department}</div>
+                  {relatedOpenRecord && <span className={`rounded-full px-2 py-1 text-xs font-bold ${selected ? "bg-white text-neutral-900" : "bg-amber-100 text-amber-700"}`}>進行中</span>}
+                </div>
+                <div className={`mt-1 text-sm ${selected ? "text-neutral-200" : "text-neutral-500"}`}>{schedule.startTime} - {schedule.endTime}</div>
+              </button>;
+            })}
+          </div>
+        </div> : <div>
+          <div className="mb-2 rounded-2xl bg-amber-50 px-3 py-2 text-xs text-amber-800">今天尚未排班。若仍打卡，系統會標記為「無排班打卡」。</div>
+          <div className="mb-2 text-sm font-bold text-neutral-700">選擇上班部門</div>
+          <div className="grid grid-cols-2 gap-2">
+            {employeeDepartments.map((department) => <button key={department} type="button" onClick={() => setSelectedDepartment(department)} className={`rounded-2xl px-4 py-3 text-sm font-black transition ${selectedDepartment === department ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-700"}`}>{department}</button>)}
+          </div>
+        </div>}
 
-      <div className="mt-4 grid gap-3">
-        {!activeRecord ? <button onClick={() => onClockIn(selectedSchedule, clockDepartment)} className="rounded-2xl bg-white px-4 py-4 text-lg font-black text-red-600 shadow-sm">上班打卡</button> : <button onClick={() => onClockOut(activeRecord, selectedSchedule)} className="rounded-2xl bg-white px-4 py-4 text-lg font-black text-red-600 shadow-sm">下班打卡</button>}
-        {activeRecord && <div className="text-center text-xs text-red-100">目前進行中：{activeRecord.clockIn} 上班｜{activeRecord.department}</div>}
+        <div className="rounded-2xl bg-neutral-50 p-3">
+          <div className="text-xs text-neutral-500">本次打卡</div>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-white px-3 py-1 text-sm font-bold text-neutral-900 shadow-sm">{clockDepartment || "未設定部門"}</span>
+            {selectedSchedule && <span className="rounded-full bg-white px-3 py-1 text-sm font-bold text-neutral-900 shadow-sm">{selectedSchedule.startTime}-{selectedSchedule.endTime}</span>}
+          </div>
+        </div>
+
+        {!activeRecord ? <button onClick={() => onClockIn(selectedSchedule, clockDepartment)} className="w-full rounded-3xl bg-neutral-900 px-4 py-5 text-xl font-black text-white shadow-sm active:scale-[0.99]">上班打卡</button> : <button onClick={() => onClockOut(activeRecord, selectedSchedule)} className="w-full rounded-3xl bg-blue-600 px-4 py-5 text-xl font-black text-white shadow-sm active:scale-[0.99]">下班打卡</button>}
+        {activeRecord && <div className="text-center text-xs text-neutral-500">目前進行中：{activeRecord.clockIn} 上班｜{activeRecord.department}</div>}
       </div>
     </section>
 
