@@ -929,25 +929,28 @@ function MyStatsPanel({ employee, setGlobalError }) {
 
   return <Card title="我的出勤紀錄" subtitle="僅供核對上下班時間，如需修改請送出補卡申請。">
     <div className="mb-4 max-w-xs"><Input label="月份" type="month" value={month} onChange={setMonth} /></div>
-    {records.length === 0 ? <div className="rounded-2xl bg-neutral-100 p-4 text-sm text-neutral-500">目前沒有出勤紀錄</div> : <div className="space-y-3">{records.map((record) => <div key={record.id} className="rounded-2xl border bg-white p-3">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="font-bold">{record.date}</div>
-          <div className="mt-1 text-sm text-neutral-500">{record.department || "未設定部門"}</div>
-        </div>
-        <span className={`rounded-full px-3 py-1 text-xs font-bold ${record.attendanceStatus === "normal" ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"}`}>{getAttendanceStatusText(record.attendanceStatus)}</span>
-      </div>
-      <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
-        <div className="rounded-2xl bg-neutral-50 p-3">
-          <div className="text-xs text-neutral-500">班表</div>
-          <div className="mt-1 font-bold">{record.scheduledStart || "-"} - {record.scheduledEnd || "-"}</div>
-        </div>
-        <div className="rounded-2xl bg-neutral-50 p-3">
-          <div className="text-xs text-neutral-500">實際</div>
-          <div className="mt-1 font-bold">{record.clockIn || "-"} - {record.clockOut || "尚未下班"}</div>
-        </div>
-      </div>
-    </div>)}</div>}
+    {records.length === 0 ? <div className="rounded-2xl bg-neutral-100 p-4 text-sm text-neutral-500">目前沒有出勤紀錄</div> : <div className="overflow-x-auto rounded-2xl border border-neutral-200 bg-white">
+      <table className="w-full min-w-[560px] text-sm">
+        <thead className="bg-neutral-100 text-neutral-600">
+          <tr>
+            <th className="px-4 py-3 text-left font-bold">日期</th>
+            <th className="px-4 py-3 text-left font-bold">姓名</th>
+            <th className="px-4 py-3 text-left font-bold">部門</th>
+            <th className="px-4 py-3 text-left font-bold">上班時間</th>
+            <th className="px-4 py-3 text-left font-bold">下班時間</th>
+          </tr>
+        </thead>
+        <tbody>
+          {records.map((record) => <tr key={record.id} className="border-t border-neutral-200">
+            <td className="px-4 py-3 text-neutral-500">{record.date}</td>
+            <td className="px-4 py-3 font-medium">{employee.name || record.employeeName || "-"}</td>
+            <td className="px-4 py-3">{record.department || "-"}</td>
+            <td className="px-4 py-3">{record.clockIn || "-"}</td>
+            <td className="px-4 py-3">{record.clockOut || "尚未下班"}</td>
+          </tr>)}
+        </tbody>
+      </table>
+    </div>}
   </Card>;
 }
 
