@@ -424,6 +424,7 @@ function App() {
   const [todaySchedules, setTodaySchedules] = useState([]);
   const [activeTab, setActiveTab] = useState("clock");
   const [companyLocations, setCompanyLocations] = useState(DEFAULT_COMPANY_LOCATIONS);
+  const [successPopup, setSuccessPopup] = useState(null);
 
   const isManager = useMemo(() => profile?.userId && (OWNER_LINE_USER_IDS.includes(profile.userId) || employee?.role === "owner" || employee?.role === "manager"), [profile, employee]);
 
@@ -627,7 +628,15 @@ function App() {
         updatedAt: serverTimestamp(),
       };
       const ref = await safeRun(() => addDoc(collection(db, "attendanceRecords"), data), "上班打卡失敗。", setError);
-      if (ref) setTodayRecords((prev) => [{ id: ref.id, ...data }, ...prev]);
+      if (ref) {
+        setTodayRecords((prev) => [{ id: ref.id, ...data }, ...prev]);
+        setSuccessPopup({
+          title: "上班打卡成功",
+          time,
+          department,
+          subtitle: selectedSchedule ? `${selectedSchedule.startTime}-${selectedSchedule.endTime}` : "無排班打卡",
+        });
+      }
     } catch (err) {
       const message = err?.message || "定位失敗，請開啟手機定位權限後再打卡。";
       alert(message);
@@ -668,7 +677,15 @@ function App() {
         updatedAt: serverTimestamp(),
       };
       const ok = await safeRun(() => updateDoc(doc(db, "attendanceRecords", record.id), updateData), "下班打卡失敗。", setError);
-      if (ok !== null) setTodayRecords((prev) => prev.map((item) => item.id === record.id ? { ...item, ...updateData } : item));
+      if (ok !== null) {
+        setTodayRecords((prev) => prev.map((item) => item.id === record.id ? { ...item, ...updateData } : item));
+        setSuccessPopup({
+          title: "下班打卡成功",
+          time,
+          department: record.department || matchedLocation.name,
+          subtitle: `今日工時 ${formatHours(workMinutes)} 小時`,
+        });
+      }
     } catch (err) {
       const message = err?.message || "定位失敗，請開啟手機定位權限後再打卡。";
       alert(message);
@@ -676,7 +693,7 @@ function App() {
     }
   }
 
-  if (loading) return <FullPage message="系統載入中..." />;
+  if (loading) return <SplashScreen />;
   if (!profile) return <ErrorPage message={error || "尚未取得 LINE / DEV 身分。"} onRetry={boot} />;
   if (!employee) return <JoinPage profile={profile} onSubmit={applyJoin} error={error} />;
   if (employee.status === "pending") return <FullPage message="你的加入申請已送出，請等待主管審核。" />;
@@ -715,8 +732,44 @@ function App() {
         {activeTab === "schedule" && isManager && <SchedulePanel setGlobalError={setError} />}
         {activeTab === "salary" && isManager && <SalaryPanel setGlobalError={setError} />}
       </main>
+      {successPopup && <ClockSuccessPopup data={successPopup} onClose={() => setSuccessPopup(null)} />}
     </div>
   );
+}
+
+function SplashScreen() {
+  return <div className="flex min-h-screen items-center justify-center bg-white p-6">
+    <div className="flex flex-col items-center text-center">
+      <div className="mb-5 flex h-32 w-32 items-center justify-center overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-black/5">
+        <img src="/logo.jpg" alt="來來 Logo" className="h-full w-full object-contain p-2" onError={(e) => { e.currentTarget.style.display = "none"; }} />
+      </div>
+      <div className="text-xl font-black tracking-wide text-neutral-900">員工打卡系統</div>
+      <div className="mt-2 text-sm text-neutral-500">系統載入中...</div>
+      <div className="mt-5 h-2 w-32 overflow-hidden rounded-full bg-neutral-100">
+        <div className="h-full w-1/2 animate-pulse rounded-full bg-neutral-900" />
+      </div>
+    </div>
+  </div>;
+}
+
+function ClockSuccessPopup({ data, onClose }) {
+  useEffect(() => {
+    const timer = setTimeout(onClose, 1800);
+    return () => clearTimeout(timer);
+  }, [onClose]);
+
+  return <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/35 p-6">
+    <div className="w-full max-w-sm rounded-3xl bg-white p-6 text-center shadow-xl">
+      <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-green-50 text-3xl">✓</div>
+      <div className="text-xl font-black text-neutral-900">{data.title}</div>
+      <div className="mt-3 rounded-2xl bg-neutral-50 p-4">
+        <div className="text-3xl font-black text-neutral-900">{data.time}</div>
+        <div className="mt-2 text-sm font-bold text-neutral-600">{data.department}</div>
+        {data.subtitle && <div className="mt-1 text-xs text-neutral-500">{data.subtitle}</div>}
+      </div>
+      <button onClick={onClose} className="mt-5 w-full rounded-2xl bg-neutral-900 px-4 py-3 font-bold text-white">完成</button>
+    </div>
+  </div>;
 }
 
 function FullPage({ message, tone = "normal" }) {
