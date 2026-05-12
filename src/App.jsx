@@ -818,9 +818,12 @@ function ClockPanel({ employee, todayRecords, todaySchedules, onClockIn, onClock
   const [selectedDepartment, setSelectedDepartment] = useState(employeeDepartments[0] || "烘焙坊");
 
   const openRecords = todayRecords.filter((record) => !record.clockOut);
-  const selectedSchedule = todaySchedules.find((schedule) => schedule.id === selectedScheduleId) || todaySchedules[0] || null;
-  const activeRecord = selectedSchedule ? openRecords.find((record) => record.scheduleId === selectedSchedule.id) || null : openRecords[0] || null;
+  const isManualDepartmentMode = selectedScheduleId === "__manual__";
+  const selectedSchedule = isManualDepartmentMode ? null : (todaySchedules.find((schedule) => schedule.id === selectedScheduleId) || todaySchedules[0] || null);
   const clockDepartment = selectedSchedule?.department || selectedDepartment;
+  const activeRecord = selectedSchedule
+    ? openRecords.find((record) => record.scheduleId === selectedSchedule.id) || null
+    : openRecords.find((record) => !record.scheduleId && record.department === clockDepartment) || null;
 
   const scheduleOptions = todaySchedules.length > 0 ? todaySchedules : [];
 
@@ -838,11 +841,11 @@ function ClockPanel({ employee, todayRecords, todaySchedules, onClockIn, onClock
       </div>
 
       <div className="space-y-4 p-4">
-        {scheduleOptions.length > 0 ? <div>
-          <div className="mb-2 text-sm font-bold text-neutral-700">選擇今日班次</div>
+        {scheduleOptions.length > 0 && <div>
+          <div className="mb-2 text-sm font-bold text-neutral-700">今日已排班</div>
           <div className="grid gap-2">
             {scheduleOptions.map((schedule) => {
-              const selected = selectedSchedule?.id === schedule.id;
+              const selected = selectedSchedule?.id === schedule.id && !isManualDepartmentMode;
               const relatedOpenRecord = openRecords.find((record) => record.scheduleId === schedule.id);
               return <button key={schedule.id} type="button" onClick={() => setSelectedScheduleId(schedule.id)} className={`rounded-2xl border px-4 py-3 text-left transition ${selected ? "border-neutral-900 bg-neutral-900 text-white" : "border-neutral-200 bg-neutral-50 text-neutral-800"}`}>
                 <div className="flex items-center justify-between gap-2">
@@ -853,19 +856,31 @@ function ClockPanel({ employee, todayRecords, todaySchedules, onClockIn, onClock
               </button>;
             })}
           </div>
-        </div> : <div>
-          <div className="mb-2 rounded-2xl bg-amber-50 px-3 py-2 text-xs text-amber-800">今天尚未排班。若仍打卡，系統會標記為「無排班打卡」。</div>
-          <div className="mb-2 text-sm font-bold text-neutral-700">選擇上班部門</div>
-          <div className="grid grid-cols-2 gap-2">
-            {employeeDepartments.map((department) => <button key={department} type="button" onClick={() => setSelectedDepartment(department)} className={`rounded-2xl px-4 py-3 text-sm font-black transition ${selectedDepartment === department ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-700"}`}>{department}</button>)}
-          </div>
         </div>}
+
+        <div>
+          <div className="mb-2 text-sm font-bold text-neutral-700">自由選擇打卡部門</div>
+          {scheduleOptions.length > 0 && <div className="mb-2 rounded-2xl bg-amber-50 px-3 py-2 text-xs text-amber-800">如果今天某個部門沒排班，也可以在這裡選部門打卡，系統會標記為「無排班打卡」。</div>}
+          {scheduleOptions.length === 0 && <div className="mb-2 rounded-2xl bg-amber-50 px-3 py-2 text-xs text-amber-800">今天尚未排班。若仍打卡，系統會標記為「無排班打卡」。</div>}
+          <div className="grid grid-cols-2 gap-2">
+            {employeeDepartments.map((department) => {
+              const selected = isManualDepartmentMode && selectedDepartment === department;
+              const relatedOpenRecord = openRecords.find((record) => !record.scheduleId && record.department === department);
+              return <button key={department} type="button" onClick={() => { setSelectedScheduleId("__manual__"); setSelectedDepartment(department); }} className={`rounded-2xl px-4 py-3 text-sm font-black transition ${selected ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-700"}`}>
+                <div className="flex items-center justify-center gap-2">
+                  <span>{department}</span>
+                  {relatedOpenRecord && <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${selected ? "bg-white text-neutral-900" : "bg-amber-100 text-amber-700"}`}>進行中</span>}
+                </div>
+              </button>;
+            })}
+          </div>
+        </div>
 
         <div className="rounded-2xl bg-neutral-50 p-3">
           <div className="text-xs text-neutral-500">本次打卡</div>
           <div className="mt-1 flex flex-wrap items-center gap-2">
             <span className="rounded-full bg-white px-3 py-1 text-sm font-bold text-neutral-900 shadow-sm">{clockDepartment || "未設定部門"}</span>
-            {selectedSchedule && <span className="rounded-full bg-white px-3 py-1 text-sm font-bold text-neutral-900 shadow-sm">{selectedSchedule.startTime}-{selectedSchedule.endTime}</span>}
+            {selectedSchedule ? <span className="rounded-full bg-white px-3 py-1 text-sm font-bold text-neutral-900 shadow-sm">{selectedSchedule.startTime}-{selectedSchedule.endTime}</span> : <span className="rounded-full bg-amber-50 px-3 py-1 text-sm font-bold text-amber-700 shadow-sm">無排班打卡</span>}
           </div>
         </div>
 
