@@ -420,7 +420,7 @@ function App() {
   const [error, setError] = useState("");
   const [profile, setProfile] = useState(null);
   const [employee, setEmployee] = useState(null);
-  const [attendanceRecords, setAttendanceRecords] = useState([]);
+  const [todayRecords, setTodayRecords] = useState([]);
   const [todaySchedules, setTodaySchedules] = useState([]);
   const [activeTab, setActiveTab] = useState("clock");
   const [companyLocations, setCompanyLocations] = useState(DEFAULT_COMPANY_LOCATIONS);
@@ -1090,7 +1090,7 @@ function AdminPanel({ currentUser, setGlobalError, companyLocations, setCompanyL
   const [correctionsExpanded, setCorrectionsExpanded] = useState(false);
   const [employees, setEmployees] = useState([]);
   const [corrections, setCorrections] = useState([]);
-  const [todayRecords, setTodayRecords] = useState([]);
+  const [attendanceRecords, setAttendanceRecords] = useState([]);
   const [creatingEmployee, setCreatingEmployee] = useState(false);
   const [editingEmployeeId, setEditingEmployeeId] = useState(null);
   const [creatingAttendance, setCreatingAttendance] = useState(false);
