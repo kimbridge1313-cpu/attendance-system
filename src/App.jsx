@@ -52,6 +52,13 @@ const firebaseConfig = {
 const DEPARTMENTS = ["烘焙坊", "超市"];
 const DEFAULT_GRACE_MINUTES = 10;
 const DEFAULT_FULL_TIME_MONTHLY_HOURS = 160;
+// 薪資計算用：若主管在打卡紀錄中填了 recognizedHours / recognizedMinutes，就以認列時數計薪；沒有填則回到原本 workMinutes。
+const getRecognizedMinutes = (record) => {
+  if (record?.recognizedMinutes !== undefined && record?.recognizedMinutes !== null && record?.recognizedMinutes !== "") return Number(record.recognizedMinutes || 0);
+  if (record?.recognizedHours !== undefined && record?.recognizedHours !== null && record?.recognizedHours !== "") return Math.round(Number(record.recognizedHours || 0) * 60);
+  return Number(record?.workMinutes || 0);
+};
+const getRecognizedHours = (record) => formatHours(getRecognizedMinutes(record));
 const DEV_ALLOW_LOCATION_FALLBACK = true;
 
 const DEFAULT_COMPANY_LOCATIONS = [
