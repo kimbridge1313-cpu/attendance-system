@@ -16,8 +16,6 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 import liff from "@line/liff";
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
 
 /**
  * Attendance LIFF + Firebase Firestore Frontend
@@ -1302,67 +1300,58 @@ function SalaryPanel({ setGlobalError }) {
     if (ok !== null) await load();
   }
 
-  // 匯出單一員工 / 單一部門 / 單月份的薪資單 PDF。
+  // 匯出單一員工 / 單一部門 / 單月份的薪資單 CSV。
   // 內容包含：薪資摘要 + 打卡明細（日期、上班、下班、認列時數）。
-  function exportPayrollPdf(row) {
-    const doc = new jsPDF({ orientation: "p", unit: "mm", format: "a4" });
-
-    doc.setFontSize(18);
-    doc.text("Payroll Slip", 14, 18);
-
-    doc.setFontSize(11);
-    doc.text(`Month: ${month}`, 14, 28);
-    doc.text(`Name: ${row.name}`, 14, 35);
-    doc.text(`Department: ${row.department}`, 14, 42);
-    doc.text(`Type: ${row.employeeType === "fullTime" ? "Full Time" : "Hourly"}`, 14, 49);
-
-    autoTable(doc, {
-      startY: 56,
-      theme: "grid",
-      head: [["項目", "數值"]],
-      body: [
-        ["認列總工時", `${row.hours} 小時`],
-        ["基本薪資", `$${Number(row.basePay || 0).toLocaleString()}`],
-        ["加班費", `$${Number(row.overtimePay || 0).toLocaleString()}`],
-        ["增加費用", `$${Number(row.additions || 0).toLocaleString()}`],
-        ["扣除費用", `$${Number(row.deductions || 0).toLocaleString()}`],
-        ["應發薪資", `$${Number(row.salary || 0).toLocaleString()}`],
-      ],
-      styles: { fontSize: 10 },
-      headStyles: { fillColor: [35, 35, 35] },
-    });
-
-    autoTable(doc, {
-      startY: doc.lastAutoTable.finalY + 8,
-      theme: "grid",
-      head: [["日期", "上班", "下班", "認列時數"]],
-      body: (row.attendanceDetails || []).map((record) => [
+  function exportPayrollDetailCsv(row) {
+    const rows = [
+      ["薪資單"],
+      ["月份", month],
+      ["姓名", row.name],
+      ["部門", row.department],
+      ["薪資類型", row.employeeType === "fullTime" ? "正職" : "時薪"],
+      ["認列總工時", row.hours],
+      ["基本薪資", row.basePay],
+      ["加班費", row.overtimePay],
+      ["增加費用", row.additions],
+      ["扣除費用", row.deductions],
+      ["應發薪資", row.salary],
+      [],
+      ["打卡明細"],
+      ["日期", "上班", "下班", "認列時數"],
+      ...((row.attendanceDetails || []).map((record) => [
         record.date || "",
         record.clockIn || "",
         record.clockOut || "",
-        String(record.recognizedHours ?? getRecognizedHours(record) ?? 0),
-      ]),
-      styles: { fontSize: 10 },
-      headStyles: { fillColor: [66, 66, 66] },
-    });
+        getRecognizedHours(record),
+      ])),
+    ];
 
     if (row.adjustments.length) {
-      autoTable(doc, {
-        startY: doc.lastAutoTable.finalY + 8,
-        theme: "grid",
-        head: [["加扣項", "內容"]],
-        body: row.adjustments.map((item) => [
+      rows.push([]);
+      rows.push(["加扣項"]);
+      rows.push(["類型", "項目", "金額", "備註"]);
+      row.adjustments.forEach((item) => {
+        rows.push([
           item.type === "addition" ? "增加" : "扣除",
-          `${item.title}｜$${Number(item.amount || 0).toLocaleString()}${item.note ? `｜${item.note}` : ""}`,
-        ]),
-        styles: { fontSize: 10 },
-        headStyles: { fillColor: [90, 90, 90] },
+          item.title || "",
+          Number(item.amount || 0),
+          item.note || "",
+        ]);
       });
     }
 
-    const safeName = String(row.name || "employee").replace(/[\/:*?"<>|]/g, "-");
-    const safeDepartment = String(row.department || "department").replace(/[\/:*?"<>|]/g, "-");
-    doc.save(`薪資單_${safeName}_${safeDepartment}_${month}.pdf`);
+    const csv = rows.map((rowItem) => rowItem.map(csvEscape).join(",")).join("\n");
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const safeName = String(row.name || "employee").replace(/[\\/:*?"<>|]/g, "-");
+    const safeDepartment = String(row.department || "department").replace(/[\\/:*?"<>|]/g, "-");
+    link.href = url;
+    link.download = `薪資單_${safeName}_${safeDepartment}_${month}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
   const rows = employees.flatMap((emp) => {
     const empId = emp.lineUserId || emp.id;
@@ -1422,7 +1411,7 @@ function SalaryPanel({ setGlobalError }) {
     downloadCsv(`department-payroll-${month}.csv`, headers, exportRows);
   }
 
-  return <Card title="薪資單" subtitle="可自訂薪資加項與扣項，例如：獎金、請假扣費、餐費、借支等。"><div className="mb-4 grid gap-3 md:grid-cols-4"><Input label="月份" type="month" value={month} onChange={setMonth} /><InfoBox label="總加項" value={`$${totalAdditions.toLocaleString()}`} /><InfoBox label="總扣項" value={`$${totalDeductions.toLocaleString()}`} /><InfoBox label="應發薪資合計" value={`$${totalPayroll.toLocaleString()}`} /></div><div className="mb-5 flex flex-wrap justify-end gap-2"><button type="button" onClick={exportDepartmentPayrollCsv} className="rounded-2xl bg-white px-4 py-2 text-sm font-bold text-neutral-700 shadow-sm">匯出部門統計 CSV</button><button type="button" onClick={exportPayrollCsv} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">匯出薪資單 CSV</button></div><div className="mb-5 rounded-3xl border border-neutral-200 bg-white p-4"><div className="mb-3"><h3 className="font-bold">各部門薪資統計</h3><p className="mt-1 text-xs text-neutral-500">依實際打卡部門分攤計算；同一位員工若兩個部門都有打卡，會分別列入各部門。</p></div>{departmentPayrollRows.length === 0 ? <div className="rounded-2xl bg-neutral-50 p-3 text-sm text-neutral-500">目前沒有薪資資料</div> : <div className="overflow-x-auto"><table className="w-full min-w-[920px] border-separate border-spacing-y-2 text-sm"><thead className="text-left text-neutral-500"><tr><th className="px-3 py-2">部門</th><th className="px-3 py-2">人數</th><th className="px-3 py-2">總工時</th><th className="px-3 py-2">基本薪資</th><th className="px-3 py-2">加班費</th><th className="px-3 py-2">增加費用</th><th className="px-3 py-2">扣除費用</th><th className="px-3 py-2">應發薪資</th></tr></thead><tbody>{departmentPayrollRows.map((row) => <tr key={row.department} className="bg-neutral-100"><td className="rounded-l-2xl px-3 py-3 font-bold">{row.department}</td><td className="px-3 py-3">{row.employeeCount}</td><td className="px-3 py-3">{row.totalHours}</td><td className="px-3 py-3">${row.basePay.toLocaleString()}</td><td className="px-3 py-3">${row.overtimePay.toLocaleString()}</td><td className="px-3 py-3 text-green-700">${row.additions.toLocaleString()}</td><td className="px-3 py-3 text-red-700">${row.deductions.toLocaleString()}</td><td className="rounded-r-2xl px-3 py-3 font-bold">${row.salary.toLocaleString()}</td></tr>)}</tbody></table></div>}</div><div className="mb-5 rounded-3xl border border-neutral-200 bg-neutral-50 p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="font-bold">薪資調整項</h3><p className="mt-1 text-xs text-neutral-500">加項會增加應發薪資，扣項會扣除應發薪資。</p></div><button type="button" onClick={() => setCreatingAdjustment(!creatingAdjustment)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingAdjustment ? "收合" : "新增調整項"}</button></div>{creatingAdjustment && <form onSubmit={createPayrollAdjustment} className="grid gap-3 md:grid-cols-6"><Select label="員工" value={adjustmentForm.employeeId} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, employeeId: v })}>{employees.filter((emp) => emp.role !== "owner").map((emp) => <option key={emp.id} value={emp.lineUserId || emp.id}>{emp.name || emp.displayName}</option>)}</Select><Select label="類型" value={adjustmentForm.type} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, type: v, title: v === "addition" ? "獎金" : "請假扣費" })}><option value="addition">增加費用</option><option value="deduction">扣除費用</option></Select><Input label="項目名稱" value={adjustmentForm.title} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, title: v })} /><Input label="金額" type="number" value={String(adjustmentForm.amount)} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, amount: Number(v || 0) })} /><Input label="備註" value={adjustmentForm.note} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white">新增</button></form>}</div><div className="space-y-4">{rows.map((row) => <div key={row.id} className="rounded-3xl border bg-white p-4"><div className="grid gap-3 md:grid-cols-[1.5fr_1fr_1fr_1fr_1fr] md:items-center"><div><div className="font-bold">{row.name}</div><div className="text-xs text-neutral-500">{row.department}｜{row.employeeType === "fullTime" ? "正職" : "時薪"}</div></div><InfoBox label="總工時" value={`${row.hours} 小時`} /><InfoBox label="基本薪資" value={`$${Number(row.basePay || 0).toLocaleString()}`} /><InfoBox label="加班費" value={`$${Number(row.overtimePay || 0).toLocaleString()}`} /><InfoBox label="應發薪資" value={`$${Number(row.salary || 0).toLocaleString()}`} /></div><div className="mt-4 grid gap-3 md:grid-cols-5"><div className="rounded-2xl bg-neutral-100 p-3 text-sm"><div className="text-neutral-500">出勤天數</div><div className="font-bold">{row.days}</div></div><div className="rounded-2xl bg-neutral-100 p-3 text-sm"><div className="text-neutral-500">異常</div><div className="font-bold">{row.abnormalCount}</div></div><div className="rounded-2xl bg-neutral-100 p-3 text-sm"><div className="text-neutral-500">加班時數</div><div className="font-bold">{row.overtimeHours || 0}</div></div><div className="rounded-2xl bg-green-50 p-3 text-sm text-green-700"><div>增加費用</div><div className="font-bold">${Number(row.additions || 0).toLocaleString()}</div></div><div className="rounded-2xl bg-red-50 p-3 text-sm text-red-700"><div>扣除費用</div><div className="font-bold">${Number(row.deductions || 0).toLocaleString()}</div></div></div><div className="mt-4 flex justify-end"><button type="button" onClick={() => exportPayrollPdf(row)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">匯出薪資單 PDF</button></div><div className="mt-4"><div className="mb-2 text-sm font-bold text-neutral-700">調整明細</div>{row.adjustments.length === 0 ? <div className="rounded-2xl bg-neutral-50 p-3 text-sm text-neutral-500">尚無加扣項</div> : <div className="space-y-2">{row.adjustments.map((item) => <div key={item.id} className={`flex items-center justify-between rounded-2xl p-3 text-sm ${item.type === "addition" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}><div><div className="font-bold">{item.type === "addition" ? "+" : "-"} ${Number(item.amount || 0).toLocaleString()}｜{item.title}</div>{item.note && <div className="text-xs opacity-80">{item.note}</div>}</div><button onClick={() => deletePayrollAdjustment(item)} className="rounded-xl bg-white px-3 py-2 font-bold text-neutral-700">刪除</button></div>)}</div>}</div></div>)}</div></Card>;
+  return <Card title="薪資單" subtitle="可自訂薪資加項與扣項，例如：獎金、請假扣費、餐費、借支等。"><div className="mb-4 grid gap-3 md:grid-cols-4"><Input label="月份" type="month" value={month} onChange={setMonth} /><InfoBox label="總加項" value={`$${totalAdditions.toLocaleString()}`} /><InfoBox label="總扣項" value={`$${totalDeductions.toLocaleString()}`} /><InfoBox label="應發薪資合計" value={`$${totalPayroll.toLocaleString()}`} /></div><div className="mb-5 flex flex-wrap justify-end gap-2"><button type="button" onClick={exportDepartmentPayrollCsv} className="rounded-2xl bg-white px-4 py-2 text-sm font-bold text-neutral-700 shadow-sm">匯出部門統計 CSV</button><button type="button" onClick={exportPayrollCsv} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">匯出薪資單 CSV</button></div><div className="mb-5 rounded-3xl border border-neutral-200 bg-white p-4"><div className="mb-3"><h3 className="font-bold">各部門薪資統計</h3><p className="mt-1 text-xs text-neutral-500">依實際打卡部門分攤計算；同一位員工若兩個部門都有打卡，會分別列入各部門。</p></div>{departmentPayrollRows.length === 0 ? <div className="rounded-2xl bg-neutral-50 p-3 text-sm text-neutral-500">目前沒有薪資資料</div> : <div className="overflow-x-auto"><table className="w-full min-w-[920px] border-separate border-spacing-y-2 text-sm"><thead className="text-left text-neutral-500"><tr><th className="px-3 py-2">部門</th><th className="px-3 py-2">人數</th><th className="px-3 py-2">總工時</th><th className="px-3 py-2">基本薪資</th><th className="px-3 py-2">加班費</th><th className="px-3 py-2">增加費用</th><th className="px-3 py-2">扣除費用</th><th className="px-3 py-2">應發薪資</th></tr></thead><tbody>{departmentPayrollRows.map((row) => <tr key={row.department} className="bg-neutral-100"><td className="rounded-l-2xl px-3 py-3 font-bold">{row.department}</td><td className="px-3 py-3">{row.employeeCount}</td><td className="px-3 py-3">{row.totalHours}</td><td className="px-3 py-3">${row.basePay.toLocaleString()}</td><td className="px-3 py-3">${row.overtimePay.toLocaleString()}</td><td className="px-3 py-3 text-green-700">${row.additions.toLocaleString()}</td><td className="px-3 py-3 text-red-700">${row.deductions.toLocaleString()}</td><td className="rounded-r-2xl px-3 py-3 font-bold">${row.salary.toLocaleString()}</td></tr>)}</tbody></table></div>}</div><div className="mb-5 rounded-3xl border border-neutral-200 bg-neutral-50 p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="font-bold">薪資調整項</h3><p className="mt-1 text-xs text-neutral-500">加項會增加應發薪資，扣項會扣除應發薪資。</p></div><button type="button" onClick={() => setCreatingAdjustment(!creatingAdjustment)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">{creatingAdjustment ? "收合" : "新增調整項"}</button></div>{creatingAdjustment && <form onSubmit={createPayrollAdjustment} className="grid gap-3 md:grid-cols-6"><Select label="員工" value={adjustmentForm.employeeId} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, employeeId: v })}>{employees.filter((emp) => emp.role !== "owner").map((emp) => <option key={emp.id} value={emp.lineUserId || emp.id}>{emp.name || emp.displayName}</option>)}</Select><Select label="類型" value={adjustmentForm.type} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, type: v, title: v === "addition" ? "獎金" : "請假扣費" })}><option value="addition">增加費用</option><option value="deduction">扣除費用</option></Select><Input label="項目名稱" value={adjustmentForm.title} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, title: v })} /><Input label="金額" type="number" value={String(adjustmentForm.amount)} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, amount: Number(v || 0) })} /><Input label="備註" value={adjustmentForm.note} onChange={(v) => setAdjustmentForm({ ...adjustmentForm, note: v })} /><button className="rounded-2xl bg-blue-600 px-4 py-3 font-bold text-white">新增</button></form>}</div><div className="space-y-4">{rows.map((row) => <div key={row.id} className="rounded-3xl border bg-white p-4"><div className="grid gap-3 md:grid-cols-[1.5fr_1fr_1fr_1fr_1fr] md:items-center"><div><div className="font-bold">{row.name}</div><div className="text-xs text-neutral-500">{row.department}｜{row.employeeType === "fullTime" ? "正職" : "時薪"}</div></div><InfoBox label="總工時" value={`${row.hours} 小時`} /><InfoBox label="基本薪資" value={`$${Number(row.basePay || 0).toLocaleString()}`} /><InfoBox label="加班費" value={`$${Number(row.overtimePay || 0).toLocaleString()}`} /><InfoBox label="應發薪資" value={`$${Number(row.salary || 0).toLocaleString()}`} /></div><div className="mt-4 grid gap-3 md:grid-cols-5"><div className="rounded-2xl bg-neutral-100 p-3 text-sm"><div className="text-neutral-500">出勤天數</div><div className="font-bold">{row.days}</div></div><div className="rounded-2xl bg-neutral-100 p-3 text-sm"><div className="text-neutral-500">異常</div><div className="font-bold">{row.abnormalCount}</div></div><div className="rounded-2xl bg-neutral-100 p-3 text-sm"><div className="text-neutral-500">加班時數</div><div className="font-bold">{row.overtimeHours || 0}</div></div><div className="rounded-2xl bg-green-50 p-3 text-sm text-green-700"><div>增加費用</div><div className="font-bold">${Number(row.additions || 0).toLocaleString()}</div></div><div className="rounded-2xl bg-red-50 p-3 text-sm text-red-700"><div>扣除費用</div><div className="font-bold">${Number(row.deductions || 0).toLocaleString()}</div></div></div><div className="mt-4 flex justify-end"><button type="button" onClick={() => exportPayrollDetailCsv(row)} className="rounded-2xl bg-neutral-900 px-4 py-2 text-sm font-bold text-white">匯出薪資單 CSV</button></div><div className="mt-4"><div className="mb-2 text-sm font-bold text-neutral-700">調整明細</div>{row.adjustments.length === 0 ? <div className="rounded-2xl bg-neutral-50 p-3 text-sm text-neutral-500">尚無加扣項</div> : <div className="space-y-2">{row.adjustments.map((item) => <div key={item.id} className={`flex items-center justify-between rounded-2xl p-3 text-sm ${item.type === "addition" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}><div><div className="font-bold">{item.type === "addition" ? "+" : "-"} ${Number(item.amount || 0).toLocaleString()}｜{item.title}</div>{item.note && <div className="text-xs opacity-80">{item.note}</div>}</div><button onClick={() => deletePayrollAdjustment(item)} className="rounded-xl bg-white px-3 py-2 font-bold text-neutral-700">刪除</button></div>)}</div>}</div></div>)}</div></Card>;
 }
 
 function RecordTable({ records }) {
