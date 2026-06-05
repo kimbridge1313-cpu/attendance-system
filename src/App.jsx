@@ -1340,7 +1340,9 @@ function SalaryPanel({ setGlobalError }) {
       });
     }
 
-    const csv = rows.map((rowItem) => rowItem.map(csvEscape).join(",")).join("
+    const csv = rows
+      .map((rowItem) => rowItem.map(csvEscape).join(","))
+      .join("
 ");
     const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
