@@ -1342,8 +1342,7 @@ function SalaryPanel({ setGlobalError }) {
 
     const csv = rows
       .map((rowItem) => rowItem.map(csvEscape).join(","))
-      .join("
-");
+      .join(String.fromCharCode(10));
     const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
