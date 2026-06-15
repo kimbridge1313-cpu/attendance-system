@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/fix-csv-newline.cjs",
     "build": "vite build",
     "preview": "vite preview"
   },
