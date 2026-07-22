@@ -4,8 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/apply-employee-schedule-settings.cjs && node scripts/fix-csv-newline.cjs",
     "dev": "vite",
-    "prebuild": "node scripts/fix-csv-newline.cjs",
+    "prebuild": "node scripts/apply-employee-schedule-settings.cjs && node scripts/fix-csv-newline.cjs",
     "build": "vite build",
     "preview": "vite preview"
   },
