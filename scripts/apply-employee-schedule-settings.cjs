@@ -53,5 +53,11 @@ replaceOnce(
   "schedule employee filtering and ordering"
 );
 
+replaceOnce(
+  'function exportMonthlyScheduleCsv() { const monthDates = getMonthDates(selectedMonth); const headers = ["日期", "星期", ...boardEmployees.map((emp) => emp.name || emp.displayName || "未命名員工")]; const rows = monthDates.map((day) => [ day.day, day.weekday, ...boardEmployees.map((emp) => { const shifts = schedules .filter((item) => item.employeeId === emp.lineUserId && item.date === day.date) .map((item) => `${item.startTime}-${item.endTime}`) .join(" / "); return shifts || "X"; }), ]); downloadCsv(`monthly-schedule-${selectedMonth}.csv`, headers, rows); }',
+  'async function exportMonthlyScheduleCsv() { const monthDates = getMonthDates(selectedMonth); if (!monthDates.length) return; const firstDate = monthDates[0].date; const lastDate = monthDates[monthDates.length - 1].date; const snap = await safeRun(() => getDocs(query(collection(db, "schedules"), where("date", ">=", firstDate), where("date", "<=", lastDate))), "讀取整月班表失敗。", setGlobalError); if (!snap) return; const monthlySchedules = snap.docs.map((d) => ({ id: d.id, ...d.data() })); const headers = ["日期", "星期", ...boardEmployees.map((emp) => emp.name || emp.displayName || "未命名員工")]; const rows = monthDates.map((day) => [day.day, day.weekday, ...boardEmployees.map((emp) => { const shifts = monthlySchedules.filter((item) => item.employeeId === emp.lineUserId && item.date === day.date).map((item) => item.isRest || item.shiftName === "休息" ? "休息" : `${item.startTime}-${item.endTime}`).join(" / "); return shifts || "X"; })]); downloadCsv(`monthly-schedule-${selectedMonth}.csv`, headers, rows); }',
+  "full month schedule export"
+);
+
 fs.writeFileSync(appPath, source, "utf8");
 console.log("Employee schedule settings patch applied.");
