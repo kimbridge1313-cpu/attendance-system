@@ -2,10 +2,6 @@ import crypto from "node:crypto";
 
 const FEIE_PRINT_URL = "https://api.jp.feieyun.com/Api/Open/printMsg";
 
-function badRequest(res, message) {
-  return res.status(400).json({ ok: false, message });
-}
-
 function makeSignature(user, ukey, stime) {
   return crypto.createHash("sha1").update(`${user}${ukey}${stime}`).digest("hex");
 }
@@ -16,16 +12,18 @@ export default async function handler(req, res) {
     return res.status(405).json({ ok: false, message: "Method not allowed" });
   }
 
-  const body = req.body || {};
-  const user = String(body.user || "").trim();
-  const ukey = String(body.ukey || "").trim();
-  const sn = String(body.sn || "").trim();
-  const content = String(body.content || "").trim();
+  const user = String(process.env.FEIE_USER || "").trim();
+  const ukey = String(process.env.FEIE_UKEY || "").trim();
+  const sn = String(process.env.FEIE_SN || "").trim();
+  const content = String(req.body?.content || "").trim();
 
-  if (!user) return badRequest(res, "Missing required field: user");
-  if (!ukey) return badRequest(res, "Missing required field: ukey");
-  if (!sn) return badRequest(res, "Missing required field: sn");
-  if (!content) return badRequest(res, "Missing required field: content");
+  if (!user || !ukey || !sn) {
+    return res.status(500).json({
+      ok: false,
+      message: "飛鵝環境變數尚未設定：FEIE_USER、FEIE_UKEY、FEIE_SN",
+    });
+  }
+  if (!content) return res.status(400).json({ ok: false, message: "缺少列印內容" });
 
   const stime = String(Math.floor(Date.now() / 1000));
   const params = new URLSearchParams({
