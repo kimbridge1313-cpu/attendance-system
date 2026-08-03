@@ -1,9 +1,19 @@
 import crypto from "node:crypto";
 
 const FEIE_PRINT_URL = "https://api.jp.feieyun.com/Api/Open/printMsg";
+const CUT_TAG = "<CUT>";
+const DEFAULT_FEED_LINES = Number(process.env.FEIE_FEED_LINES_BEFORE_CUT || 6);
 
 function makeSignature(user, ukey, stime) {
   return crypto.createHash("sha1").update(`${user}${ukey}${stime}`).digest("hex");
+}
+
+function normalizePrintContent(rawContent) {
+  const contentWithoutCut = String(rawContent || "")
+    .replaceAll(CUT_TAG, "")
+    .replace(/(<BR>\s*)+$/g, "");
+  const feedLines = Math.max(2, Math.min(12, Number.isFinite(DEFAULT_FEED_LINES) ? DEFAULT_FEED_LINES : 6));
+  return `${contentWithoutCut}${"<BR>".repeat(feedLines)}${CUT_TAG}`;
 }
 
 export default async function handler(req, res) {
@@ -15,7 +25,7 @@ export default async function handler(req, res) {
   const user = String(process.env.FEIE_USER || "").trim();
   const ukey = String(process.env.FEIE_UKEY || "").trim();
   const sn = String(process.env.FEIE_SN || "").trim();
-  const content = String(req.body?.content || "").trim();
+  const rawContent = String(req.body?.content || "").trim();
 
   if (!user || !ukey || !sn) {
     return res.status(500).json({
@@ -23,8 +33,9 @@ export default async function handler(req, res) {
       message: "飛鵝環境變數尚未設定：FEIE_USER、FEIE_UKEY、FEIE_SN",
     });
   }
-  if (!content) return res.status(400).json({ ok: false, message: "缺少列印內容" });
+  if (!rawContent) return res.status(400).json({ ok: false, message: "缺少列印內容" });
 
+  const content = normalizePrintContent(rawContent);
   const stime = String(Math.floor(Date.now() / 1000));
   const params = new URLSearchParams({
     user,
