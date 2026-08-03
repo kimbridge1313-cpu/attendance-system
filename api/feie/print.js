@@ -13,7 +13,7 @@ function normalizePrintContent(rawContent) {
     .replaceAll(CUT_TAG, "")
     .replace(/(<BR>\s*)+$/g, "");
   const feedLines = Math.max(2, Math.min(12, Number.isFinite(DEFAULT_FEED_LINES) ? DEFAULT_FEED_LINES : 6));
-  return `${contentWithoutCut}${"<BR>".repeat(feedLines)}${CUT_TAG}`;
+  return `${contentWithoutCut}${"<BR>".repeat(feedLines)}`;
 }
 
 export default async function handler(req, res) {
