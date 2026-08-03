@@ -38,7 +38,7 @@ replaceOnce(
       lines.push(\`\${item.type === "addition" ? "+" : "-"}\${Number(item.amount || 0)} \${item.title || ""}\${item.note ? \`（\${item.note}）\` : ""}<BR>\`);
     });
   }
-  lines.push("<BR><CUT>");
+  lines.push("<BR><BR><BR><BR><CUT>");
   return lines.join("");
 }
 
